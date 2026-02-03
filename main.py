@@ -102,9 +102,10 @@ class TeleglasPro:
         self.confidence_scorer = ConfidenceScorer(
             learning_rate=0.1
         )
+        # CRITICAL FIX Bug #6: Load cooldown from config (was hardcoded)
         self.signal_validator = SignalValidator(
+            min_confidence=signals_config.get('min_confidence', 70.0),
             max_signals_per_hour=signals_config.get('max_signals_per_hour', 50),
-            min_confidence=signals_config.get('min_confidence', 65.0),
             cooldown_minutes=signals_config.get('cooldown_minutes', 5)
         )
         
