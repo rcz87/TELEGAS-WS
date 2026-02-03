@@ -113,8 +113,7 @@ class StopHuntDetector:
             price_zone = self.get_price_zone(liquidations)
             
             # Step 5: Check for absorption
-            # Wait a bit for absorption to happen
-            await asyncio.sleep(1)  # Small delay to allow buffer to update
+            # No sleep needed - buffer is updated synchronously
             absorption_volume = await self.check_absorption(symbol, direction, absorption_window)
             absorption_detected = absorption_volume >= self.absorption_threshold
             

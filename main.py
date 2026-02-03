@@ -1,8 +1,9 @@
 # TELEGLAS Pro - Main Entry Point
-# Real-Time Market Intelligence System - PRODUCTION READY
+# Real-Time Market Intelligence System - PRODUCTION READY v2.0
+# FIXED: Priority 1 bugs - subscription, type mismatch, config alignment
 
 """
-TELEGLAS Pro - Complete Integration
+TELEGLAS Pro - Complete Integration with Bug Fixes
 
 Connects all layers into working system:
 WebSocket → Processors → Analyzers → Signals → Alerts → Telegram
@@ -11,6 +12,11 @@ Provides 30-90 second information edge through:
 - Stop Hunt Detection ($2M+ liquidation cascades)
 - Order Flow Analysis (whale tracking)
 - Event Pattern Detection (market anomalies)
+
+FIXES:
+- Added subscription logic (BUG #1)
+- Fixed type mismatch in on_message (BUG #2)
+- Aligned config keys with config.yaml (BUG #3)
 """
 
 import asyncio
@@ -19,6 +25,7 @@ import signal
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 import yaml
 
 # Import all components
@@ -46,40 +53,47 @@ class TeleglasPro:
     """
     
     def __init__(self, config: dict):
-        """Initialize all components"""
+        """Initialize all components with correct config"""
         self.config = config
         self.logger = setup_logger("TeleglasPro", "INFO")
+        
+        # Get config sections
+        pairs_config = config.get('pairs', {})
+        thresholds = config.get('thresholds', {})
+        signals_config = config.get('signals', {})
+        buffers_config = config.get('buffers', {})
+        analysis_config = config.get('analysis', {})
         
         # Processors
         self.message_parser = MessageParser()
         self.data_validator = DataValidator()
         self.buffer_manager = BufferManager(
-            max_liquidations=config.get('buffer', {}).get('max_liquidations', 1000),
-            max_trades=config.get('buffer', {}).get('max_trades', 500)
+            max_liquidations=buffers_config.get('max_liquidations', 1000),
+            max_trades=buffers_config.get('max_trades', 500)
         )
         
-        # Analyzers
+        # Analyzers (using correct config paths)
         self.stop_hunt_detector = StopHuntDetector(
             self.buffer_manager,
-            threshold=config.get('analyzers', {}).get('stop_hunt_threshold', 2_000_000)
+            threshold=thresholds.get('liquidation_cascade', 2_000_000)
         )
         self.order_flow_analyzer = OrderFlowAnalyzer(
             self.buffer_manager,
-            large_order_threshold=config.get('analyzers', {}).get('large_order_threshold', 10_000)
+            large_order_threshold=thresholds.get('large_order_threshold', 10_000)
         )
         self.event_detector = EventPatternDetector(self.buffer_manager)
         
         # Signals
         self.signal_generator = SignalGenerator(
-            min_confidence=config.get('signals', {}).get('min_confidence', 65.0)
+            min_confidence=signals_config.get('min_confidence', 65.0)
         )
         self.confidence_scorer = ConfidenceScorer(
-            learning_rate=config.get('signals', {}).get('learning_rate', 0.1)
+            learning_rate=0.1
         )
         self.signal_validator = SignalValidator(
-            max_signals_per_hour=config.get('signals', {}).get('max_per_hour', 50),
-            min_confidence=config.get('signals', {}).get('min_confidence', 65.0),
-            cooldown_minutes=config.get('signals', {}).get('cooldown_minutes', 5)
+            max_signals_per_hour=signals_config.get('max_signals_per_hour', 50),
+            min_confidence=signals_config.get('min_confidence', 65.0),
+            cooldown_minutes=signals_config.get('cooldown_minutes', 5)
         )
         
         # Alerts
@@ -93,21 +107,33 @@ class TeleglasPro:
             self.telegram_bot = TelegramBot(
                 bot_token=telegram_config.get('bot_token', ''),
                 chat_id=telegram_config.get('chat_id', ''),
-                rate_limit_delay=telegram_config.get('rate_limit', 3.0)
+                rate_limit_delay=config.get('alerts', {}).get('rate_limit_delay', 3.0)
             )
         
         # WebSocket
-        ws_config = config.get('coinglass', {})
+        ws_config = config.get('websocket', {})
+        coinglass_config = config.get('coinglass', {})
         self.websocket_client = WebSocketClient(
-            api_key=ws_config.get('api_key', ''),
+            api_key=coinglass_config.get('api_key', ''),
+            url=ws_config.get('url', "wss://open-ws.coinglass.com/ws-api"),
             reconnect_delay=ws_config.get('reconnect_delay', 5),
-            max_reconnect_delay=ws_config.get('max_reconnect_delay', 60)
+            max_reconnect_delay=ws_config.get('max_reconnect_delay', 60),
+            heartbeat_interval=ws_config.get('heartbeat_interval', 20)
         )
+        
+        # Symbols to monitor
+        self.symbols = pairs_config.get('primary', ['BTCUSDT', 'ETHUSDT'])
+        
+        # Debouncing (FIX: Prevent task explosion)
+        self.analysis_locks = {}  # Per-symbol locks
+        self.last_analysis = {}   # Per-symbol last analysis time
         
         # Statistics
         self.stats = {
             'messages_received': 0,
             'messages_processed': 0,
+            'liquidations_processed': 0,
+            'trades_processed': 0,
             'signals_generated': 0,
             'alerts_sent': 0,
             'errors': 0
@@ -115,50 +141,68 @@ class TeleglasPro:
         
         self.logger.info("✅ All components initialized")
     
-    async def on_message(self, raw_message: str):
+    async def on_connect(self):
+        """
+        Called when WebSocket connects
+        FIX BUG #1: Add subscription logic here!
+        """
+        self.logger.info("✅ WebSocket connected")
+        
+        # Subscribe to liquidation orders channel
+        subscribe_msg = {
+            "method": "subscribe",
+            "channels": ["liquidationOrders"]
+        }
+        success = await self.websocket_client.send_message(subscribe_msg)
+        if success:
+            self.logger.info("📡 Subscribed to liquidationOrders channel")
+        else:
+            self.logger.error("❌ Failed to subscribe to liquidationOrders")
+        
+        # Optional: Subscribe to futures trades for major pairs
+        for symbol in self.symbols[:3]:  # Limit to top 3 to avoid overwhelming
+            trade_channel = f"futures_trades@all_{symbol}@0"
+            subscribe_msg = {
+                "method": "subscribe",
+                "channels": [trade_channel]
+            }
+            success = await self.websocket_client.send_message(subscribe_msg)
+            if success:
+                self.logger.info(f"📡 Subscribed to {trade_channel}")
+    
+    async def on_message(self, raw_message):
         """
         Main message processing pipeline
         
+        FIX BUG #2: raw_message is already a dict (not string)!
+        WebSocket client parses JSON, we receive dict directly.
+        
         Pipeline:
-        1. Parse message
+        1. Route by channel type
         2. Validate data
         3. Buffer data
-        4. Run analyzers
-        5. Generate signal
-        6. Validate signal
-        7. Format message
-        8. Queue alert
-        9. Send to Telegram
+        4. Trigger analysis (debounced)
         """
         try:
             self.stats['messages_received'] += 1
             
-            # Step 1: Parse
-            parsed = self.message_parser.parse(raw_message)
-            if not parsed:
+            # Message is already parsed as dict by WebSocket client
+            if not isinstance(raw_message, dict):
+                self.logger.warning(f"Unexpected message type: {type(raw_message)}")
                 return
             
-            # Step 2 & 3: Validate and Buffer
-            if parsed.event == "liquidation":
-                validation = self.data_validator.validate_liquidation(parsed.raw)
-                if validation.is_valid:
-                    liq_event = self.message_parser.parse_liquidation(parsed.raw)
-                    if liq_event:
-                        self.buffer_manager.add_liquidation(liq_event.symbol, liq_event.raw_data)
-                        
-            elif parsed.event == "trade":
-                validation = self.data_validator.validate_trade(parsed.raw)
-                if validation.is_valid:
-                    trade_event = self.message_parser.parse_trade(parsed.raw)
-                    if trade_event:
-                        self.buffer_manager.add_trade(trade_event.symbol, trade_event.raw_data)
+            channel = raw_message.get('channel', '')
+            event = raw_message.get('event', '')
             
-            # Step 4-9: Analysis and alerting (async to not block)
-            # Only analyze for configured symbols
-            symbols_to_analyze = self.config.get('symbols', ['BTCUSDT', 'ETHUSDT'])
-            
-            for symbol in symbols_to_analyze:
-                asyncio.create_task(self.analyze_and_alert(symbol))
+            # Route by channel type
+            if channel == 'liquidationOrders' or event == 'liquidationOrders':
+                await self._handle_liquidation_message(raw_message)
+            elif 'futures_trades' in channel:
+                await self._handle_trade_message(raw_message)
+            else:
+                # Ignore ping/pong and other system messages
+                if event not in ['ping', 'pong', 'login']:
+                    self.logger.debug(f"Unknown channel/event: {channel}/{event}")
             
             self.stats['messages_processed'] += 1
             
@@ -166,70 +210,151 @@ class TeleglasPro:
             self.stats['errors'] += 1
             self.logger.error(f"Message processing error: {e}")
     
+    async def _handle_liquidation_message(self, message: dict):
+        """
+        Process liquidation order messages
+        FIX BUG #2: Proper handling of dict message
+        """
+        try:
+            # Extract liquidation events from message
+            data = message.get('data', [])
+            if not isinstance(data, list):
+                data = [data] if data else []
+            
+            for liq_event in data:
+                # Validate structure
+                validation = self.data_validator.validate_liquidation(liq_event)
+                if validation.is_valid:
+                    # Extract fields
+                    symbol = liq_event.get('symbol', 'UNKNOWN')
+                    price = float(liq_event.get('price', 0))
+                    side = int(liq_event.get('side', 0))
+                    volume_usd = float(liq_event.get('volUsd', 0))
+                    timestamp_ms = liq_event.get('time', 0)
+                    
+                    # Add to buffer
+                    self.buffer_manager.add_liquidation(
+                        symbol=symbol,
+                        liquidation_data=liq_event
+                    )
+                    
+                    self.stats['liquidations_processed'] += 1
+                    
+                    # Trigger analysis for this symbol only (debounced)
+                    if symbol in self.symbols:
+                        asyncio.create_task(self.analyze_and_alert(symbol))
+                        
+        except Exception as e:
+            self.logger.error(f"Error handling liquidation: {e}")
+            self.stats['errors'] += 1
+    
+    async def _handle_trade_message(self, message: dict):
+        """
+        Process trade messages
+        FIX BUG #2: Proper handling of dict message
+        """
+        try:
+            # Extract trade events from message
+            data = message.get('data', [])
+            if not isinstance(data, list):
+                data = [data] if data else []
+            
+            for trade in data:
+                # Validate structure
+                validation = self.data_validator.validate_trade(trade)
+                if validation.is_valid:
+                    symbol = trade.get('symbol', 'UNKNOWN')
+                    
+                    # Add to buffer
+                    self.buffer_manager.add_trade(
+                        symbol=symbol,
+                        trade_data=trade
+                    )
+                    
+                    self.stats['trades_processed'] += 1
+                    
+                    # Trigger analysis for this symbol (debounced)
+                    if symbol in self.symbols:
+                        asyncio.create_task(self.analyze_and_alert(symbol))
+                        
+        except Exception as e:
+            self.logger.error(f"Error handling trade: {e}")
+            self.stats['errors'] += 1
+    
     async def analyze_and_alert(self, symbol: str):
         """
         Run analysis and send alerts for symbol
+        FIX: Added debouncing to prevent task explosion
         """
         try:
-            # Step 4: Run analyzers
-            stop_hunt_signal = await self.stop_hunt_detector.analyze(symbol)
-            order_flow_signal = await self.order_flow_analyzer.analyze(symbol)
-            event_signals = await self.event_detector.analyze(symbol)
+            # Debounce: Don't analyze same symbol within 5 seconds
+            now = asyncio.get_event_loop().time()
+            if symbol in self.last_analysis:
+                if now - self.last_analysis[symbol] < 5:
+                    return
             
-            # Step 5: Generate unified signal
-            trading_signal = await self.signal_generator.generate(
-                symbol=symbol,
-                stop_hunt_signal=stop_hunt_signal,
-                order_flow_signal=order_flow_signal,
-                event_signals=event_signals
-            )
+            # Lock to prevent concurrent analysis of same symbol
+            if symbol not in self.analysis_locks:
+                self.analysis_locks[symbol] = asyncio.Lock()
             
-            if not trading_signal:
-                return
-            
-            # Step 6: Adjust confidence
-            adjusted_confidence = self.confidence_scorer.adjust_confidence(
-                trading_signal.confidence,
-                trading_signal.signal_type,
-                trading_signal.metadata
-            )
-            trading_signal.confidence = adjusted_confidence
-            
-            # Step 7: Validate signal
-            is_valid, reason = self.signal_validator.validate(trading_signal)
-            if not is_valid:
-                self.logger.debug(f"Signal rejected: {reason}")
-                return
-            
-            self.stats['signals_generated'] += 1
-            
-            # Step 8: Format message
-            formatted_message = self.message_formatter.format_signal(trading_signal)
-            
-            # Step 9: Queue alert
-            await self.alert_queue.add(
-                formatted_message,
-                priority=trading_signal.priority
-            )
-            
-            self.logger.info(f"🎯 Signal queued: {symbol} {trading_signal.signal_type}")
-            
+            async with self.analysis_locks[symbol]:
+                self.last_analysis[symbol] = now
+                
+                # Run analyzers
+                stop_hunt_signal = await self.stop_hunt_detector.analyze(symbol)
+                order_flow_signal = await self.order_flow_analyzer.analyze(symbol)
+                event_signals = await self.event_detector.analyze(symbol)
+                
+                # Generate unified signal
+                trading_signal = await self.signal_generator.generate(
+                    symbol=symbol,
+                    stop_hunt_signal=stop_hunt_signal,
+                    order_flow_signal=order_flow_signal,
+                    event_signals=event_signals
+                )
+                
+                if not trading_signal:
+                    return
+                
+                # Adjust confidence
+                adjusted_confidence = self.confidence_scorer.adjust_confidence(
+                    trading_signal.confidence,
+                    trading_signal.signal_type,
+                    trading_signal.metadata
+                )
+                trading_signal.confidence = adjusted_confidence
+                
+                # Validate signal
+                is_valid, reason = self.signal_validator.validate(trading_signal)
+                if not is_valid:
+                    self.logger.debug(f"Signal rejected: {reason}")
+                    return
+                
+                self.stats['signals_generated'] += 1
+                
+                # Format message
+                formatted_message = self.message_formatter.format_signal(trading_signal)
+                
+                # Queue alert
+                await self.alert_queue.add(
+                    formatted_message,
+                    priority=trading_signal.priority
+                )
+                
+                self.logger.info(f"🎯 Signal queued: {symbol} {trading_signal.signal_type}")
+                
         except Exception as e:
             self.logger.error(f"Analysis error for {symbol}: {e}")
     
     async def alert_processor(self):
-        """
-        Background task: process alert queue and send to Telegram
-        """
+        """Background task: process alert queue and send to Telegram"""
         self.logger.info("🚀 Alert processor started")
         
         while not shutdown_event.is_set():
             try:
-                # Get next alert from queue
                 queued_alert = await self.alert_queue.get(timeout=1.0)
                 
                 if queued_alert:
-                    # Send to Telegram
                     if self.telegram_bot:
                         success = await self.telegram_bot.send_alert(queued_alert.alert)
                         
@@ -237,10 +362,9 @@ class TeleglasPro:
                             await self.alert_queue.mark_processed(success=True)
                             self.stats['alerts_sent'] += 1
                         else:
-                            # Retry failed alert
                             await self.alert_queue.retry(queued_alert)
                     else:
-                        # No Telegram configured - just log
+                        # No Telegram - just log
                         self.logger.info(f"📤 Alert (Telegram disabled):\n{queued_alert.alert[:100]}...")
                         await self.alert_queue.mark_processed(success=True)
                         
@@ -251,14 +375,13 @@ class TeleglasPro:
         self.logger.info("Alert processor stopped")
     
     async def stats_reporter(self):
-        """
-        Background task: report statistics every 5 minutes
-        """
+        """Background task: report statistics every 5 minutes"""
         while not shutdown_event.is_set():
             await asyncio.sleep(300)  # 5 minutes
             
             self.logger.info("📊 Statistics Report:")
             self.logger.info(f"   Messages: {self.stats['messages_received']} received, {self.stats['messages_processed']} processed")
+            self.logger.info(f"   Liquidations: {self.stats['liquidations_processed']}, Trades: {self.stats['trades_processed']}")
             self.logger.info(f"   Signals: {self.stats['signals_generated']} generated")
             self.logger.info(f"   Alerts: {self.stats['alerts_sent']} sent")
             self.logger.info(f"   Errors: {self.stats['errors']}")
@@ -266,9 +389,7 @@ class TeleglasPro:
             self.logger.info(f"   Queue: {self.alert_queue.get_stats()}")
     
     async def cleanup_task(self):
-        """
-        Background task: cleanup old data every hour
-        """
+        """Background task: cleanup old data every hour"""
         while not shutdown_event.is_set():
             await asyncio.sleep(3600)  # 1 hour
             
@@ -276,15 +397,14 @@ class TeleglasPro:
             self.buffer_manager.cleanup_old_data(max_age_seconds=7200)  # 2 hours
     
     async def run(self):
-        """
-        Run the complete system
-        """
+        """Run the complete system"""
         self.logger.info("=" * 60)
-        self.logger.info("🚀 TELEGLAS Pro - Starting")
+        self.logger.info("🚀 TELEGLAS Pro - Starting (v2.0 - Bug Fixes)")
         self.logger.info("=" * 60)
         
         try:
-            # Setup callbacks
+            # Setup callbacks (FIX BUG #1: Added on_connect callback)
+            self.websocket_client.on_connect(self.on_connect)
             self.websocket_client.on_message(self.on_message)
             
             # Connect WebSocket
@@ -313,6 +433,7 @@ class TeleglasPro:
             self.logger.info("=" * 60)
             self.logger.info("✅ TELEGLAS Pro - Running")
             self.logger.info("=" * 60)
+            self.logger.info(f"Monitoring symbols: {', '.join(self.symbols)}")
             self.logger.info("Press Ctrl+C to stop")
             
             # Wait for shutdown
@@ -326,7 +447,6 @@ class TeleglasPro:
             for task in tasks:
                 task.cancel()
             
-            # Wait for tasks to finish
             await asyncio.gather(*tasks, return_exceptions=True)
             
             self.logger.info("✅ Shutdown complete")
@@ -336,7 +456,7 @@ class TeleglasPro:
             raise
 
 def load_config() -> dict:
-    """Load configuration from files"""
+    """Load configuration from files (FIX BUG #3: Proper config structure)"""
     # Load secrets from .env
     load_dotenv("config/secrets.env")
     
@@ -346,35 +466,51 @@ def load_config() -> dict:
         with open(config_path) as f:
             config = yaml.safe_load(f)
     else:
-        # Default config
+        # Default config matching config.yaml structure
         config = {
-            'coinglass': {
-                'api_key': os.getenv('COINGLASS_API_KEY', ''),
-                'reconnect_delay': 5,
-                'max_reconnect_delay': 60
+            'pairs': {
+                'primary': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
             },
-            'telegram': {
-                'enabled': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
-                'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
-                'chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
-                'rate_limit': 3.0
+            'thresholds': {
+                'liquidation_cascade': 2_000_000,
+                'large_order_threshold': 10_000,
+                'accumulation_ratio': 0.65,
+                'distribution_ratio': 0.35
             },
-            'symbols': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT'],
-            'buffer': {
+            'signals': {
+                'min_confidence': 70.0,
+                'max_signals_per_hour': 50,
+                'cooldown_minutes': 5
+            },
+            'alerts': {
+                'rate_limit_delay': 3.0,
+                'max_retries': 3
+            },
+            'buffers': {
                 'max_liquidations': 1000,
                 'max_trades': 500
             },
-            'analyzers': {
-                'stop_hunt_threshold': 2_000_000,
-                'large_order_threshold': 10_000
+            'websocket': {
+                'url': "wss://open-ws.coinglass.com/ws-api",
+                'heartbeat_interval': 20,
+                'reconnect_delay': 1,
+                'max_reconnect_delay': 60
             },
-            'signals': {
-                'min_confidence': 65.0,
-                'learning_rate': 0.1,
-                'max_per_hour': 50,
-                'cooldown_minutes': 5
+            'analysis': {
+                'stop_hunt_window': 30,
+                'order_flow_window': 300
             }
         }
+    
+    # Add secrets from environment
+    config['coinglass'] = {
+        'api_key': os.getenv('COINGLASS_API_KEY', '')
+    }
+    config['telegram'] = {
+        'enabled': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
+        'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
+        'chat_id': os.getenv('TELEGRAM_CHAT_ID', '')
+    }
     
     return config
 
@@ -393,7 +529,7 @@ async def main():
         config = load_config()
         
         # Validate required config
-        if not config['coinglass'].get('api_key'):
+        if not config.get('coinglass', {}).get('api_key'):
             logger.error("❌ COINGLASS_API_KEY not configured!")
             logger.info("Please set it in config/secrets.env")
             return
