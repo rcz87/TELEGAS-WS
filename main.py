@@ -23,13 +23,16 @@ import asyncio
 import sys
 import signal
 import os
+import threading
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import yaml
+import uvicorn
 
 # Import all components
 from src.connection.websocket_client import WebSocketClient
+from src.dashboard import api as dashboard_api
 from src.processors.message_parser import MessageParser
 from src.processors.data_validator import DataValidator
 from src.processors.buffer_manager import BufferManager
@@ -46,6 +49,15 @@ from src.utils.logger import setup_logger
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
+
+def start_dashboard_server():
+    """Start dashboard server in background thread"""
+    uvicorn.run(
+        dashboard_api.app,
+        host="0.0.0.0",
+        port=8080,
+        log_level="warning"
+    )
 
 class TeleglasPro:
     """
@@ -136,8 +148,23 @@ class TeleglasPro:
             'trades_processed': 0,
             'signals_generated': 0,
             'alerts_sent': 0,
-            'errors': 0
+            'errors': 0,
+            'uptime_seconds': 0
         }
+        
+        # Start time
+        self.start_time = datetime.now()
+        
+        # Initialize dashboard with starting coins
+        dashboard_api.initialize_coins(self.symbols)
+        
+        # Start dashboard server in background thread
+        self.dashboard_thread = threading.Thread(
+            target=start_dashboard_server,
+            daemon=True
+        )
+        self.dashboard_thread.start()
+        self.logger.info("📊 Dashboard started at http://localhost:8080")
         
         self.logger.info("✅ All components initialized")
     
@@ -332,6 +359,14 @@ class TeleglasPro:
                 
                 self.stats['signals_generated'] += 1
                 
+                # Send to dashboard
+                dashboard_api.add_signal({
+                    'symbol': symbol,
+                    'type': trading_signal.signal_type,
+                    'confidence': int(trading_signal.confidence),
+                    'description': f"{trading_signal.signal_type} detected"
+                })
+                
                 # Format message
                 formatted_message = self.message_formatter.format_signal(trading_signal)
                 
@@ -377,16 +412,23 @@ class TeleglasPro:
     async def stats_reporter(self):
         """Background task: report statistics every 5 minutes"""
         while not shutdown_event.is_set():
-            await asyncio.sleep(300)  # 5 minutes
+            await asyncio.sleep(30)  # Every 30 seconds for dashboard
             
-            self.logger.info("📊 Statistics Report:")
-            self.logger.info(f"   Messages: {self.stats['messages_received']} received, {self.stats['messages_processed']} processed")
-            self.logger.info(f"   Liquidations: {self.stats['liquidations_processed']}, Trades: {self.stats['trades_processed']}")
-            self.logger.info(f"   Signals: {self.stats['signals_generated']} generated")
-            self.logger.info(f"   Alerts: {self.stats['alerts_sent']} sent")
-            self.logger.info(f"   Errors: {self.stats['errors']}")
-            self.logger.info(f"   Buffer: {self.buffer_manager.get_stats()}")
-            self.logger.info(f"   Queue: {self.alert_queue.get_stats()}")
+            # Update uptime
+            uptime = (datetime.now() - self.start_time).total_seconds()
+            self.stats['uptime_seconds'] = int(uptime)
+            
+            # Update dashboard
+            dashboard_api.update_stats(self.stats)
+            
+            # Log every 5 minutes
+            if int(uptime) % 300 == 0:
+                self.logger.info("📊 Statistics Report:")
+                self.logger.info(f"   Messages: {self.stats['messages_received']} received, {self.stats['messages_processed']} processed")
+                self.logger.info(f"   Liquidations: {self.stats['liquidations_processed']}, Trades: {self.stats['trades_processed']}")
+                self.logger.info(f"   Signals: {self.stats['signals_generated']} generated")
+                self.logger.info(f"   Alerts: {self.stats['alerts_sent']} sent")
+                self.logger.info(f"   Errors: {self.stats['errors']}")
     
     async def cleanup_task(self):
         """Background task: cleanup old data every hour"""

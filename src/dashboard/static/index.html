@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>TELEGLAS Pro Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.13.3/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1f2937; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .fade-in { animation: fadeIn 0.3s ease-out; }
+        .progress-bar { transition: width 0.5s ease-out; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white antialiased">
+    <div x-data="dashboard()" x-init="init()" x-cloak class="min-h-screen pb-20 md:pb-4">
+        
+        <!-- Header -->
+        <header class="bg-gray-800 border-b border-gray-700 sticky top-0 z-50 shadow-lg">
+            <div class="container mx-auto px-4 py-3">
+                <div class="flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        <h1 class="text-xl md:text-2xl font-bold">📊 TELEGLAS Pro</h1>
+                        <span 
+                            class="text-xs md:text-sm px-2 py-1 rounded-full"
+                            :class="isConnected ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'"
+                            x-text="isConnected ? '🟢 Live' : '🔴 Offline'">
+                        </span>
+                    </div>
+                    <div class="text-xs text-gray-400 hidden md:block" x-text="'Up: ' + formatUptime(stats.uptime_seconds)"></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <div class="container mx-auto px-4 py-4">
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mb-4">
+                <div class="bg-gradient-to-br from-blue-900 to-blue-800 rounded-lg p-3 md:p-4 shadow-lg">
+                    <div class="text-xs text-blue-300">Messages</div>
+                    <div class="text-xl md:text-2xl font-bold" x-text="formatNumber(stats.messages_received)">0</div>
+                </div>
+                <div class="bg-gradient-to-br from-green-900 to-green-800 rounded-lg p-3 md:p-4 shadow-lg">
+                    <div class="text-xs text-green-300">Signals</div>
+                    <div class="text-xl md:text-2xl font-bold" x-text="formatNumber(stats.signals_generated)">0</div>
+                </div>
+                <div class="bg-gradient-to-br from-purple-900 to-purple-800 rounded-lg p-3 md:p-4 shadow-lg">
+                    <div class="text-xs text-purple-300">Alerts</div>
+                    <div class="text-xl md:text-2xl font-bold" x-text="formatNumber(stats.alerts_sent)">0</div>
+                </div>
+                <div class="bg-gradient-to-br from-red-900 to-red-800 rounded-lg p-3 md:p-4 shadow-lg">
+                    <div class="text-xs text-red-300">Errors</div>
+                    <div class="text-xl md:text-2xl font-bold" x-text="formatNumber(stats.errors)">0</div>
+                </div>
+            </div>
+
+            <!-- Quick Add Coin -->
+            <div class="bg-gray-800 rounded-lg p-4 mb-4 shadow-lg border border-gray-700">
+                <h2 class="text-lg font-bold mb-3">🎯 Quick Add Coin</h2>
+                <div class="flex gap-2">
+                    <input 
+                        x-model="newCoin" 
+                        @keyup.enter="addCoin"
+                        type="text" 
+                        placeholder="Enter symbol (e.g., PEPE, WIF)"
+                        class="flex-1 bg-gray-700 border border-gray-600 rounded-lg px-4 py-2 text-white placeholder-gray-400 outline-none focus:ring-2 focus:ring-blue-500">
+                    <button 
+                        @click="addCoin"
+                        :disabled="!newCoin"
+                        class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 px-6 py-2 rounded-lg font-bold">
+                        + Add
+                    </button>
+                </div>
+            </div>
+
+            <!-- Monitored Coins -->
+            <div class="bg-gray-800 rounded-lg p-4 mb-4 shadow-lg border border-gray-700">
+                <div class="flex justify-between items-center mb-3">
+                    <h2 class="text-lg font-bold">💎 Monitored Coins (<span x-text="coins.length"></span>)</h2>
+                    <button @click="loadInitialData" class="text-xs text-blue-400">🔄 Refresh</button>
+                </div>
+                
+                <div x-show="coins.length === 0" class="text-center py-8 text-gray-500">
+                    <div class="text-4xl mb-2">📭</div>
+                    <div>No coins yet. Add one above!</div>
+                </div>
+                
+                <div class="space-y-2">
+                    <template x-for="coin in coins" :key="coin.symbol">
+                        <div class="bg-gray-700 rounded-lg p-3 fade-in">
+                            <div class="flex items-start gap-3">
+                                <input 
+                                    type="checkbox" 
+                                    :checked="coin.active"
+                                    @change="toggleCoin(coin.symbol, $event.target.checked)"
+                                    class="mt-1 w-5 h-5 rounded">
+                                
+                                <div class="flex-1">
+                                    <div class="flex justify-between mb-2">
+                                        <div class="font-bold text-lg" x-text="coin.symbol"></div>
+                                        <button 
+                                            @click="removeCoin(coin.symbol)"
+                                            class="text-red-400 hover:text-red-300 text-xl px-2">×</button>
+                                    </div>
+                                    
+                                    <div x-show="coin.active">
+                                        <div class="mb-2">
+                                            <div class="flex justify-between text-xs text-gray-400 mb-1">
+                                                <span>Buy: <span class="text-green-400" x-text="coin.buy_ratio + '%'"></span></span>
+                                                <span>Sell: <span class="text-red-400" x-text="coin.sell_ratio + '%'"></span></span>
+                                            </div>
+                                            <div class="flex gap-1 h-2">
+                                                <div class="bg-green-500 rounded-l progress-bar" :style="`width: ${coin.buy_ratio || 0}%`"></div>
+                                                <div class="bg-red-500 rounded-r progress-bar" :style="`width: ${coin.sell_ratio || 0}%`"></div>
+                                            </div>
+                                        </div>
+                                        <div class="flex gap-4 text-xs">
+                                            <div>Large Buys: <span class="text-green-400 font-bold" x-text="coin.large_buys || 0"></span></div>
+                                            <div>Large Sells: <span class="text-red-400 font-bold" x-text="coin.large_sells || 0"></span></div>
+                                        </div>
+                                        <div class="text-xs text-gray-500 mt-1">Updated: <span x-text="coin.last_update || 'N/A'"></span></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+
+            <!-- Live Signals -->
+            <div class="bg-gray-800 rounded-lg p-4 shadow-lg border border-gray-700">
+                <h2 class="text-lg font-bold mb-3">⚡ Live Signals (<span x-text="signals.length"></span>)</h2>
+                
+                <div x-show="signals.length === 0" class="text-center py-8 text-gray-500">
+                    <div class="text-4xl mb-2">📊</div>
+                    <div>Waiting for signals...</div>
+                </div>
+                
+                <div class="space-y-2 max-h-96 overflow-y-auto">
+                    <template x-for="signal in signals.slice(0, 20)" :key="signal.id">
+                        <div class="bg-gray-700 rounded-lg p-3 fade-in">
+                            <div class="flex justify-between items-start mb-2">
+                                <div class="flex items-center gap-2">
+                                    <span class="text-xs text-gray-400" x-text="signal.time"></span>
+                                    <span class="font-bold" x-text="signal.symbol"></span>
+                                </div>
+                                <div 
+                                    class="text-sm font-bold px-2 py-1 rounded"
+                                    :class="signal.confidence >= 80 ? 'bg-red-600' : signal.confidence >= 70 ? 'bg-yellow-600' : 'bg-blue-600'"
+                                    x-text="signal.confidence + '%'">
+                                </div>
+                            </div>
+                            <div class="text-sm font-medium" x-text="(signal.type || '').replace(/_/g, ' ')"></div>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast -->
+        <div 
+            x-show="toast.show"
+            x-transition
+            class="fixed bottom-24 md:bottom-8 right-4 bg-gray-800 border border-gray-700 rounded-lg shadow-xl p-4 max-w-sm z-50">
+            <div class="flex items-center gap-3">
+                <span class="text-2xl" x-text="toast.emoji"></span>
+                <div>
+                    <div class="font-bold" x-text="toast.title"></div>
+                    <div class="text-sm text-gray-400" x-text="toast.message"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
