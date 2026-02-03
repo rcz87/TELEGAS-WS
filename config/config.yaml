@@ -1,0 +1,71 @@
+# TELEGLAS Pro - Configuration File
+
+# Trading Pairs to Monitor
+pairs:
+  primary:
+    - BTCUSDT
+    - ETHUSDT
+    - BNBUSDT
+  secondary:
+    - SOLUSDT
+    - ADAUSDT
+    - MATICUSDT
+    - AVAXUSDT
+    - DOGEUSDT
+
+# Detection Thresholds
+thresholds:
+  # Stop Hunt Detector
+  liquidation_cascade: 2000000  # $2M
+  absorption_minimum: 100000    # $100K
+  
+  # Order Flow Analyzer
+  large_order_threshold: 10000  # $10K
+  accumulation_ratio: 0.65      # 65% buy ratio
+  distribution_ratio: 0.35      # 35% buy ratio
+  min_large_orders: 3           # Minimum whale orders
+  
+  # Event Pattern Detector
+  funding_rate_extreme: 0.001   # 0.1%
+
+# Signal Settings
+signals:
+  min_confidence: 70.0           # Minimum confidence to send alert
+  max_signals_per_hour: 50       # Rate limit
+  cooldown_minutes: 5            # Cooldown between same signals
+
+# Alert Settings
+alerts:
+  rate_limit_delay: 3            # Seconds between Telegram messages
+  max_retries: 3                 # Retry attempts on failure
+  
+  # Alert priorities
+  urgent_threshold: 85           # Confidence for URGENT
+  watch_threshold: 70            # Confidence for WATCH
+  info_threshold: 60             # Confidence for INFO
+
+# Buffer Settings
+buffers:
+  max_liquidations: 1000         # Per symbol
+  max_trades: 500                # Per symbol
+  cleanup_interval: 3600         # Seconds (1 hour)
+
+# WebSocket Settings
+websocket:
+  url: "wss://open-ws.coinglass.com/ws-api"
+  heartbeat_interval: 20         # Seconds
+  reconnect_delay: 1             # Initial delay (exponential backoff)
+  max_reconnect_delay: 60        # Max delay
+
+# Logging
+logging:
+  level: "INFO"                  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "logs/teleglas.log"
+  max_size_mb: 10
+  backup_count: 5
+
+# Analysis Windows
+analysis:
+  stop_hunt_window: 30           # Seconds
+  order_flow_window: 300         # Seconds (5 minutes)
+  absorption_window: 30          # Seconds
