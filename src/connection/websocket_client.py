@@ -143,29 +143,39 @@ class WebSocketClient:
     async def disconnect(self):
         """
         Close WebSocket connection gracefully
+        
+        CRITICAL FIX Bug #8: Improved graceful shutdown with timeout
         """
         self.logger.info("Disconnecting...")
         self._should_reconnect = False
         self.state = ConnectionState.CLOSED
         
-        # Cancel background tasks
+        # Cancel background tasks with timeout
         if self._receive_task and not self._receive_task.done():
             self._receive_task.cancel()
             try:
-                await self._receive_task
-            except asyncio.CancelledError:
+                # CRITICAL FIX: Add 5s timeout for task cleanup
+                await asyncio.wait_for(self._receive_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
                 
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
             try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
+                # CRITICAL FIX: Add 5s timeout for task cleanup
+                await asyncio.wait_for(self._heartbeat_task, timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
         
-        # Close connection
+        # Close connection with timeout
         if self.connection and not self.connection.closed:
-            await self.connection.close()
+            try:
+                # CRITICAL FIX: Add 5s timeout for connection close
+                await asyncio.wait_for(self.connection.close(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.logger.warning("Connection close timeout - forcing")
+            except Exception as e:
+                self.logger.warning(f"Error closing connection: {e}")
             
         self.connection = None
         self._is_authenticated = False
@@ -173,7 +183,12 @@ class WebSocketClient:
         
         # Call disconnect callback
         if self.on_disconnect_callback:
-            await self.on_disconnect_callback()
+            try:
+                await asyncio.wait_for(self.on_disconnect_callback(), timeout=3.0)
+            except asyncio.TimeoutError:
+                self.logger.warning("Disconnect callback timeout")
+            except Exception as e:
+                self.logger.warning(f"Disconnect callback error: {e}")
     
     async def send_message(self, message: Dict[str, Any]) -> bool:
         """
@@ -246,12 +261,23 @@ class WebSocketClient:
     async def _receive_loop(self):
         """
         Background task to receive messages
+        
+        CRITICAL FIX Bug #7: Added timeout to prevent hanging indefinitely
         """
         try:
             while self.is_connected():
                 try:
-                    message = await self.connection.recv()
+                    # CRITICAL FIX: Add 60s timeout to prevent hanging
+                    message = await asyncio.wait_for(
+                        self.connection.recv(),
+                        timeout=60.0
+                    )
                     await self._handle_message(message)
+                    
+                except asyncio.TimeoutError:
+                    self.logger.warning("Receive timeout (60s) - connection may be stale")
+                    # Continue loop - heartbeat will detect dead connection
+                    continue
                     
                 except websockets.exceptions.ConnectionClosed:
                     self.logger.warning("Connection closed by server")

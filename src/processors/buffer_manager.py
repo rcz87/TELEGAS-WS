@@ -51,6 +51,10 @@ class BufferManager:
         self._total_trades = 0
         self._symbols_tracked = set()
         
+        # CRITICAL FIX Bug #10: Track dropped messages
+        self._dropped_liquidations = 0
+        self._dropped_trades = 0
+        
         # Logger
         self.logger = setup_logger("BufferManager", "INFO")
         
@@ -73,8 +77,13 @@ class BufferManager:
             if "timestamp" not in event:
                 event["timestamp"] = int(time.time() * 1000)  # milliseconds
             
+            # CRITICAL FIX Bug #10: Track if buffer is full (will drop oldest)
+            buffer = self.liquidation_buffers[symbol]
+            if len(buffer) >= self.max_liquidations:
+                self._dropped_liquidations += 1
+            
             # Add to buffer
-            self.liquidation_buffers[symbol].append(event)
+            buffer.append(event)
             self._total_liquidations += 1
             
             self.logger.debug(
@@ -104,8 +113,13 @@ class BufferManager:
             if "timestamp" not in event:
                 event["timestamp"] = int(time.time() * 1000)  # milliseconds
             
+            # CRITICAL FIX Bug #10: Track if buffer is full (will drop oldest)
+            buffer = self.trade_buffers[symbol]
+            if len(buffer) >= self.max_trades:
+                self._dropped_trades += 1
+            
             # Add to buffer
-            self.trade_buffers[symbol].append(event)
+            buffer.append(event)
             self._total_trades += 1
             
             self.logger.debug(
@@ -116,16 +130,19 @@ class BufferManager:
         except Exception as e:
             self.logger.error(f"Failed to add trade: {e}")
     
-    def get_liquidations(self, symbol: str, time_window: int = 30) -> List[dict]:
+    def get_liquidations(self, symbol: str, time_window: int = 30, max_count: Optional[int] = None) -> List[dict]:
         """
         Get liquidations within time window
+        
+        CRITICAL FIX Bug #9: Added max_count to prevent unbounded results
         
         Args:
             symbol: Trading pair
             time_window: Time window in seconds (default 30s)
+            max_count: Maximum number of events to return (default None = all)
             
         Returns:
-            List of liquidation events within time window
+            List of liquidation events within time window (limited by max_count)
         """
         if symbol not in self.liquidation_buffers:
             return []
@@ -141,6 +158,10 @@ class BufferManager:
                 if event.get("timestamp", 0) >= cutoff_time
             ]
             
+            # CRITICAL FIX: Limit results to max_count (most recent first)
+            if max_count is not None and len(recent_events) > max_count:
+                recent_events = recent_events[-max_count:]
+            
             self.logger.debug(
                 f"Retrieved {len(recent_events)} liquidations for {symbol} "
                 f"in last {time_window}s"
@@ -152,16 +173,19 @@ class BufferManager:
             self.logger.error(f"Failed to get liquidations: {e}")
             return []
     
-    def get_trades(self, symbol: str, time_window: int = 300) -> List[dict]:
+    def get_trades(self, symbol: str, time_window: int = 300, max_count: Optional[int] = None) -> List[dict]:
         """
         Get trades within time window
+        
+        CRITICAL FIX Bug #9: Added max_count to prevent unbounded results
         
         Args:
             symbol: Trading pair
             time_window: Time window in seconds (default 300s = 5 minutes)
+            max_count: Maximum number of events to return (default None = all)
             
         Returns:
-            List of trade events within time window
+            List of trade events within time window (limited by max_count)
         """
         if symbol not in self.trade_buffers:
             return []
@@ -176,6 +200,10 @@ class BufferManager:
                 event for event in buffer
                 if event.get("timestamp", 0) >= cutoff_time
             ]
+            
+            # CRITICAL FIX: Limit results to max_count (most recent first)
+            if max_count is not None and len(recent_events) > max_count:
+                recent_events = recent_events[-max_count:]
             
             self.logger.debug(
                 f"Retrieved {len(recent_events)} trades for {symbol} "
@@ -324,7 +352,12 @@ class BufferManager:
             "symbols_tracked": len(self._symbols_tracked),
             "symbols_list": self.get_tracked_symbols(),
             "avg_liquidations_per_symbol": total_liq_in_buffers / max(len(self.liquidation_buffers), 1),
-            "avg_trades_per_symbol": total_trades_in_buffers / max(len(self.trade_buffers), 1)
+            "avg_trades_per_symbol": total_trades_in_buffers / max(len(self.trade_buffers), 1),
+            # CRITICAL FIX Bug #10: Report dropped messages
+            "dropped_liquidations": self._dropped_liquidations,
+            "dropped_trades": self._dropped_trades,
+            "drop_rate_liquidations": self._dropped_liquidations / max(self._total_liquidations, 1) * 100,
+            "drop_rate_trades": self._dropped_trades / max(self._total_trades, 1) * 100
         }
     
     def get_memory_usage_estimate(self) -> dict:

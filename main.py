@@ -505,8 +505,46 @@ class TeleglasPro:
             self.logger.error(f"Runtime error: {e}")
             raise
 
+def validate_config(config: dict) -> tuple[bool, list[str]]:
+    """
+    Validate configuration structure
+    
+    CRITICAL FIX Bug #11: Config validation to catch errors early
+    
+    Returns:
+        Tuple of (is_valid, list_of_errors)
+    """
+    errors = []
+    required_sections = ['pairs', 'thresholds', 'signals', 'alerts', 'buffers', 'websocket']
+    
+    for section in required_sections:
+        if section not in config:
+            errors.append(f"Missing required section: {section}")
+    
+    # Validate pairs
+    if 'pairs' in config:
+        if 'primary' not in config['pairs'] or not config['pairs']['primary']:
+            errors.append("Config error: pairs.primary must contain at least one symbol")
+    
+    # Validate numeric values
+    numeric_checks = [
+        ('thresholds.liquidation_cascade', config.get('thresholds', {}).get('liquidation_cascade')),
+        ('signals.min_confidence', config.get('signals', {}).get('min_confidence')),
+        ('buffers.max_liquidations', config.get('buffers', {}).get('max_liquidations')),
+    ]
+    
+    for key, value in numeric_checks:
+        if value is not None and (not isinstance(value, (int, float)) or value <= 0):
+            errors.append(f"Config error: {key} must be a positive number")
+    
+    return (len(errors) == 0, errors)
+
 def load_config() -> dict:
-    """Load configuration from files (FIX BUG #3: Proper config structure)"""
+    """
+    Load configuration from files
+    
+    CRITICAL FIX Bug #11: Added validation
+    """
     # Load secrets from .env
     load_dotenv("config/secrets.env")
     
@@ -577,6 +615,14 @@ async def main():
         # Load configuration
         logger.info("Loading configuration...")
         config = load_config()
+        
+        # CRITICAL FIX Bug #11: Validate config structure
+        is_valid, errors = validate_config(config)
+        if not is_valid:
+            logger.error("❌ Configuration validation failed:")
+            for error in errors:
+                logger.error(f"  - {error}")
+            return
         
         # Validate required config
         if not config.get('coinglass', {}).get('api_key'):
