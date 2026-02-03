@@ -5,9 +5,9 @@ module.exports = {
   apps: [
     {
       name: 'teleglas-pro',
-      script: 'venv/bin/python',
+      script: 'python3',
       args: 'main.py',
-      cwd: '/home/user/teleglas-pro',
+      cwd: process.cwd(),
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
@@ -24,17 +24,6 @@ module.exports = {
       min_uptime: '10s',
       max_restarts: 10,
       restart_delay: 4000
-    },
-    {
-      name: 'teleglas-monitor',
-      script: 'venv/bin/python',
-      args: 'scripts/monitor.py',
-      cwd: '/home/user/teleglas-pro',
-      instances: 1,
-      autorestart: true,
-      cron_restart: '0 * * * *',
-      watch: false,
-      max_memory_restart: '256M'
     }
   ]
 };
