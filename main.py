@@ -155,6 +155,9 @@ class TeleglasPro:
         # Start time
         self.start_time = datetime.now()
         
+        # CRITICAL FIX Bug #2: Initialization flag to prevent race condition
+        self.initialized = False
+        
         # Initialize dashboard with starting coins
         dashboard_api.initialize_coins(self.symbols)
         
@@ -445,7 +448,7 @@ class TeleglasPro:
         self.logger.info("=" * 60)
         
         try:
-            # Setup callbacks (FIX BUG #1: Added on_connect callback)
+            # Setup callbacks
             self.websocket_client.on_connect(self.on_connect)
             self.websocket_client.on_message(self.on_message)
             
@@ -464,6 +467,10 @@ class TeleglasPro:
                     self.logger.info("✅ Telegram connected")
                 else:
                     self.logger.warning("⚠️ Telegram connection failed")
+            
+            # CRITICAL FIX Bug #2: Mark as initialized before starting tasks
+            self.initialized = True
+            self.logger.info("✅ System initialization complete")
             
             # Start background tasks
             tasks = [

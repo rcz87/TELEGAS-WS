@@ -1,43 +1,62 @@
 # Heartbeat Manager - Keep Connection Alive
-# TODO: Implement ping/pong mechanism
+# NOTE: Currently unused - heartbeat handled by websockets library
 
 """
 Heartbeat Manager Module
 
-Responsibilities:
-- Send ping every 20 seconds
-- Expect pong response
-- Trigger reconnection on timeout
+NOTE: This module was designed but not implemented.
+The websockets library handles ping/pong automatically.
+
+Future enhancement: Implement custom heartbeat logic if needed.
+
+Original Responsibilities:
+- Send periodic ping messages
+- Monitor pong responses
+- Detect stale connections
 """
 
 import asyncio
 
 class HeartbeatManager:
     """
-    Manages WebSocket heartbeat (ping/pong)
+    Manages WebSocket connection heartbeat
+    
+    NOTE: Currently a stub class. The websockets library handles ping/pong automatically.
     """
     
-    def __init__(self, websocket_client, interval: int = 20):
+    def __init__(self, websocket_client, interval: int = 30):
         self.websocket_client = websocket_client
         self.interval = interval
-        self.is_running = False
+        self.running = False
         
     async def start(self):
-        """Start heartbeat loop"""
-        # TODO: Implement heartbeat loop
+        """
+        Start heartbeat loop
+        
+        NOTE: Not implemented. Websockets library handles this automatically.
+        """
         pass
     
     async def stop(self):
-        """Stop heartbeat loop"""
-        # TODO: Implement stop logic
+        """
+        Stop heartbeat loop
+        
+        NOTE: Not implemented.
+        """
         pass
     
     async def send_ping(self):
-        """Send ping message"""
-        # TODO: Implement ping
+        """
+        Send ping message
+        
+        NOTE: Not implemented. Websockets library handles this automatically.
+        """
         pass
     
     async def handle_pong(self):
-        """Handle pong response"""
-        # TODO: Implement pong handling
+        """
+        Handle pong response
+        
+        NOTE: Not implemented. Websockets library handles this automatically.
+        """
         pass

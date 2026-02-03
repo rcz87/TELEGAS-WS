@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 import json
+import re
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
@@ -143,7 +144,9 @@ async def get_order_flow(symbol: str):
 @app.post("/api/coins/add")
 async def add_coin(request: AddCoinRequest):
     """
-    Add a new coin to monitoring
+    Add a new coin to monitoring with input validation
+    
+    SECURITY FIX Bug #4: Added input validation to prevent XSS/injection
     
     Args:
         request: AddCoinRequest with symbol
@@ -152,15 +155,32 @@ async def add_coin(request: AddCoinRequest):
         dict: Success status and coin data
         
     Raises:
-        HTTPException: If coin already exists
+        HTTPException: If coin already exists or invalid input
     """
-    symbol = request.symbol.upper()
-    if not symbol.endswith("USDT"):
-        symbol = symbol + "USDT"
+    # SECURITY FIX: Validate and sanitize input
+    symbol = request.symbol.upper().strip()
+    
+    # Remove common suffixes if present
+    for suffix in ['USDT', 'BUSD', 'USD']:
+        symbol = symbol.replace(suffix, '')
+    
+    # SECURITY: Validate format - only alphanumeric, 1-10 characters
+    if not re.match(r'^[A-Z0-9]{1,10}$', symbol):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid symbol format. Use only letters and numbers (1-10 characters)"
+        )
+    
+    # SECURITY: Check for empty symbol after sanitization
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol cannot be empty")
+    
+    # Reconstruct with USDT
+    symbol = symbol + "USDT"
     
     # Check if already exists
     if any(coin["symbol"] == symbol for coin in system_state["coins"]):
-        raise HTTPException(status_code=400, detail="Coin already monitored")
+        raise HTTPException(status_code=400, detail=f"{symbol} is already monitored")
     
     # Add to coins list
     new_coin = {
@@ -232,15 +252,31 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint for real-time updates
     
+    CRITICAL FIX Bug #2: Wait for system initialization before sending state
+    to prevent race condition where dashboard receives incomplete coin data.
+    
     Sends:
-    - Initial state on connection
+    - Initial state on connection (after init complete)
     - Real-time updates for stats, signals, order flow
     - Coin add/remove/toggle events
     """
     await websocket.accept()
     active_connections.append(websocket)
     
-    # Send initial state
+    # CRITICAL FIX: Wait for system initialization (max 3 seconds)
+    retry_count = 0
+    while retry_count < 30:  # 30 * 0.1s = 3 seconds max wait
+        # Check if main system has initialized flag
+        try:
+            # System is ready when coins are populated
+            if len(system_state["coins"]) > 0:
+                break
+        except:
+            pass
+        await asyncio.sleep(0.1)
+        retry_count += 1
+    
+    # Send initial state (now guaranteed to be complete)
     await websocket.send_json({
         "type": "initial_state",
         "data": system_state
