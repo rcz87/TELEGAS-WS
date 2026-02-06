@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 import json
+import queue
 import re
 import threading
 import time
@@ -89,6 +90,10 @@ if static_dir.exists():
 # CRITICAL FIX Bug #5: Thread-safe lock for global state
 # Prevents data corruption when multiple threads access system_state
 state_lock = threading.Lock()
+
+# Thread-safe queue for subscription requests from dashboard → main.py
+# Items are dicts: {"action": "subscribe"|"unsubscribe", "symbol": "BTCUSDT"}
+_subscription_queue: queue.Queue = queue.Queue()
 
 # Global state (updated by main.py)
 system_state = {
@@ -250,10 +255,13 @@ async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Dep
     # CRITICAL FIX Bug #5: Thread-safe write with lock
     with state_lock:
         system_state["coins"].append(new_coin)
-    
+
+    # Request trade channel subscription from main.py
+    _subscription_queue.put({"action": "subscribe", "symbol": symbol})
+
     # Broadcast to all WebSocket clients
     await broadcast_update("coin_added", new_coin)
-    
+
     return {"success": True, "coin": new_coin}
 
 @app.delete("/api/coins/remove/{symbol}")
@@ -272,10 +280,13 @@ async def remove_coin(symbol: str, _auth=Depends(verify_token), _rl=Depends(chec
     # CRITICAL FIX: Thread-safe modification
     with state_lock:
         system_state["coins"] = [c for c in system_state["coins"] if c["symbol"] != symbol]
-    
+
+    # Request trade channel unsubscription from main.py
+    _subscription_queue.put({"action": "unsubscribe", "symbol": symbol})
+
     # Broadcast to all WebSocket clients
     await broadcast_update("coin_removed", {"symbol": symbol})
-    
+
     return {"success": True, "symbol": symbol}
 
 @app.patch("/api/coins/{symbol}/toggle")
@@ -494,14 +505,32 @@ def add_signal(signal: dict):
 def get_monitored_coins() -> List[str]:
     """
     Get list of currently monitored and active coins (thread-safe)
-    
+
     CRITICAL FIX Bug #5: Thread-safe read with lock
-    
+
     Returns:
         List of symbol strings for coins that are active
     """
     with state_lock:
         return [coin["symbol"] for coin in system_state["coins"] if coin.get("active", True)]
+
+def get_pending_subscriptions() -> List[dict]:
+    """
+    Drain all pending subscription requests from the dashboard.
+
+    Called by main.py's dynamic_subscription_task to process
+    add/remove coin requests from the dashboard UI.
+
+    Returns:
+        List of {"action": "subscribe"|"unsubscribe", "symbol": str}
+    """
+    requests = []
+    while not _subscription_queue.empty():
+        try:
+            requests.append(_subscription_queue.get_nowait())
+        except queue.Empty:
+            break
+    return requests
 
 def initialize_coins(initial_coins: List[str]):
     """
