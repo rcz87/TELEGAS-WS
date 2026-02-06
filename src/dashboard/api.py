@@ -14,7 +14,7 @@ Provides REST API and WebSocket endpoints for:
 
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
@@ -94,6 +94,9 @@ state_lock = threading.Lock()
 # Thread-safe queue for subscription requests from dashboard → main.py
 # Items are dicts: {"action": "subscribe"|"unsubscribe", "symbol": "BTCUSDT"}
 _subscription_queue: queue.Queue = queue.Queue()
+
+# Database reference (set by main.py after init)
+_db = None
 
 # Global state (updated by main.py)
 system_state = {
@@ -317,6 +320,59 @@ async def toggle_coin(symbol: str, request: ToggleCoinRequest):
     await broadcast_update("coin_toggled", coin_copy)
     
     return {"success": True, "coin": coin_copy}
+
+# ============================================================================
+# CSV EXPORT & DB STATS ENDPOINTS
+# ============================================================================
+
+@app.get("/api/export/signals.csv")
+async def export_signals_csv(_auth=Depends(verify_token)):
+    """Export all signals as CSV file (downloadable as spreadsheet)."""
+    if not _db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    csv_data = await _db.export_signals_csv(limit=5000)
+    if not csv_data:
+        raise HTTPException(status_code=404, detail="No signals to export")
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=teleglas_signals.csv"}
+    )
+
+@app.get("/api/export/baselines.csv")
+async def export_baselines_csv(symbol: str = None, _auth=Depends(verify_token)):
+    """Export hourly baselines as CSV file."""
+    if not _db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    csv_data = await _db.export_baselines_csv(symbol=symbol)
+    if not csv_data:
+        raise HTTPException(status_code=404, detail="No baselines to export")
+    filename = f"teleglas_baselines_{symbol}.csv" if symbol else "teleglas_baselines.csv"
+    return Response(
+        content=csv_data,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@app.get("/api/stats/signals")
+async def get_signal_stats(_auth=Depends(verify_token)):
+    """Get aggregate signal statistics from database."""
+    if not _db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    stats = await _db.get_signal_stats()
+    by_type = await _db.get_signal_stats_by_type()
+    return {"overall": stats, "by_type": by_type}
+
+@app.get("/api/signals/history")
+async def get_signal_history(symbol: str = None, limit: int = 100, _auth=Depends(verify_token)):
+    """Get signal history from database (persisted across restarts)."""
+    if not _db:
+        raise HTTPException(status_code=503, detail="Database not initialized")
+    if symbol:
+        signals = await _db.get_signals_by_symbol(symbol, limit)
+    else:
+        signals = await _db.get_recent_signals(limit)
+    return {"signals": signals}
 
 # ============================================================================
 # WEBSOCKET ENDPOINT

@@ -35,6 +35,7 @@ class TrackedSignal:
     check_after: float  # unix time when to check outcome
     outcome: Optional[str] = None  # WIN, LOSS, NEUTRAL, or None (pending)
     exit_price: Optional[float] = None
+    _db_id: Optional[int] = None  # Database row ID for outcome updates
 
 
 class SignalTracker:
@@ -48,7 +49,8 @@ class SignalTracker:
     4. Label outcome and feed back to ConfidenceScorer
     """
 
-    def __init__(self, buffer_manager, confidence_scorer=None, check_interval_seconds: int = 900):
+    def __init__(self, buffer_manager, confidence_scorer=None, check_interval_seconds: int = 900,
+                 on_outcome_callback=None):
         """
         Initialize signal tracker
 
@@ -56,10 +58,12 @@ class SignalTracker:
             buffer_manager: BufferManager instance (to get current prices)
             confidence_scorer: ConfidenceScorer instance (to feed results)
             check_interval_seconds: How long to wait before checking outcome (default 900 = 15 min)
+            on_outcome_callback: async callback(tracked_signal, pnl_pct) called when outcome is determined
         """
         self.buffer_manager = buffer_manager
         self.confidence_scorer = confidence_scorer
         self.check_interval = check_interval_seconds
+        self._on_outcome = on_outcome_callback
         self.logger = setup_logger("SignalTracker", "INFO")
 
         # Pending signals waiting to be checked
@@ -187,7 +191,7 @@ class SignalTracker:
             return "NEUTRAL"
 
     def _record_outcome(self, tracked: TrackedSignal):
-        """Record outcome and feed to confidence scorer."""
+        """Record outcome and feed to confidence scorer + database."""
         self._completed.append(tracked)
 
         # Keep only last 500 completed signals
@@ -224,6 +228,16 @@ class SignalTracker:
                 tracked.signal_type,
                 was_successful=(tracked.outcome == "WIN")
             )
+
+        # Notify database callback
+        if self._on_outcome and tracked._db_id:
+            try:
+                import asyncio
+                asyncio.create_task(
+                    self._on_outcome(tracked, pnl_pct)
+                )
+            except Exception:
+                pass
 
     def get_track_record(self, signal_type: str) -> dict:
         """
