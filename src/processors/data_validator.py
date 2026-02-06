@@ -276,8 +276,8 @@ class DataValidator:
         if len(symbol) < 6:
             return False
         
-        # Should contain only letters
-        if not symbol.isalpha():
+        # Should contain only letters and digits (e.g. 1000PEPEUSDT)
+        if not symbol.isalnum():
             return False
         
         return True

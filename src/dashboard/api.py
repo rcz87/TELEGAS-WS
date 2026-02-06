@@ -139,8 +139,10 @@ async def root():
         if API_TOKEN:
             # Inject token as meta tag so frontend can authenticate
             from fastapi.responses import HTMLResponse
+            import html as html_mod
             html_content = html_file.read_text()
-            token_meta = f'<meta name="api-token" content="{API_TOKEN}">'
+            safe_token = html_mod.escape(API_TOKEN, quote=True)
+            token_meta = f'<meta name="api-token" content="{safe_token}">'
             html_content = html_content.replace('</head>', f'    {token_meta}\n</head>', 1)
             return HTMLResponse(content=html_content)
         return FileResponse(str(html_file))
@@ -248,11 +250,7 @@ async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Dep
     # Reconstruct with USDT
     symbol = symbol + "USDT"
     
-    # Check if already exists
-    if any(coin["symbol"] == symbol for coin in system_state["coins"]):
-        raise HTTPException(status_code=400, detail=f"{symbol} is already monitored")
-    
-    # Add to coins list (thread-safe)
+    # Add to coins list (thread-safe: check + append under same lock)
     new_coin = {
         "symbol": symbol,
         "active": True,
@@ -262,9 +260,10 @@ async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Dep
         "large_sells": 0,
         "last_update": "just added"
     }
-    
-    # CRITICAL FIX Bug #5: Thread-safe write with lock
+
     with state_lock:
+        if any(coin["symbol"] == symbol for coin in system_state["coins"]):
+            raise HTTPException(status_code=400, detail=f"{symbol} is already monitored")
         system_state["coins"].append(new_coin)
 
     # Request trade channel subscription from main.py

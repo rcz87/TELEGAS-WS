@@ -77,7 +77,7 @@ class SignalTracker:
             'total': 0, 'wins': 0, 'losses': 0, 'neutral': 0
         })
 
-    def track_signal(self, signal: Any, entry_price: float, stop_loss: float, target_price: float):
+    def track_signal(self, signal: Any, entry_price: float, stop_loss: float, target_price: float) -> 'TrackedSignal':
         """
         Start tracking a signal for outcome measurement.
 
@@ -86,6 +86,9 @@ class SignalTracker:
             entry_price: Price at signal generation
             stop_loss: Stop loss level
             target_price: Target price level
+
+        Returns:
+            TrackedSignal reference (can be used to set _db_id)
         """
         now = time.time()
         tracked = TrackedSignal(
@@ -104,6 +107,7 @@ class SignalTracker:
             f"Tracking {signal.symbol} {signal.signal_type} {signal.direction} "
             f"entry=${entry_price:,.0f} SL=${stop_loss:,.0f} TP=${target_price:,.0f}"
         )
+        return tracked
 
     def get_current_price(self, symbol: str) -> Optional[float]:
         """
@@ -144,12 +148,12 @@ class SignalTracker:
             current_price = self.get_current_price(tracked.symbol)
 
             if current_price is None or current_price <= 0:
-                # No price data available, extend check window by 5 min
-                if now - tracked.timestamp < self.check_interval * 3:
+                # No price data — extend check window (max 3 extensions = 15 min extra)
+                max_age = self.check_interval + 900  # original wait + 15 min max extension
+                if now - tracked.timestamp < max_age:
                     tracked.check_after = now + 300
                     still_pending.append(tracked)
                 else:
-                    # Too old, mark as neutral
                     tracked.outcome = "NEUTRAL"
                     tracked.exit_price = 0
                     self._record_outcome(tracked)
@@ -166,29 +170,39 @@ class SignalTracker:
         """
         Evaluate signal outcome based on price movement.
 
-        LONG signal: WIN if price >= target, LOSS if price <= SL
-        SHORT signal: WIN if price <= target, LOSS if price >= SL
+        LONG: WIN if >= target, LOSS if <= SL, PARTIAL_WIN if >= 50% to target
+        SHORT: WIN if <= target, LOSS if >= SL, PARTIAL_WIN if >= 50% to target
+        Fallback (between entry and 50% mark): NEUTRAL
         """
+        entry = tracked.entry_price
+        target = tracked.target_price
+        sl = tracked.stop_loss
+
         if tracked.direction == "LONG":
-            if current_price >= tracked.target_price:
+            if current_price >= target:
                 return "WIN"
-            elif current_price <= tracked.stop_loss:
+            elif current_price <= sl:
                 return "LOSS"
-            elif current_price > tracked.entry_price:
-                return "WIN"  # Moved in right direction
-            elif current_price < tracked.entry_price:
-                return "LOSS"  # Moved against
-            return "NEUTRAL"
+            else:
+                # Fallback: require >= 50% of distance to target for partial win
+                halfway = entry + (target - entry) * 0.5
+                if current_price >= halfway:
+                    return "WIN"
+                elif current_price < entry:
+                    return "LOSS"
+                return "NEUTRAL"
         else:  # SHORT
-            if current_price <= tracked.target_price:
+            if current_price <= target:
                 return "WIN"
-            elif current_price >= tracked.stop_loss:
+            elif current_price >= sl:
                 return "LOSS"
-            elif current_price < tracked.entry_price:
-                return "WIN"
-            elif current_price > tracked.entry_price:
-                return "LOSS"
-            return "NEUTRAL"
+            else:
+                halfway = entry - (entry - target) * 0.5
+                if current_price <= halfway:
+                    return "WIN"
+                elif current_price > entry:
+                    return "LOSS"
+                return "NEUTRAL"
 
     def _record_outcome(self, tracked: TrackedSignal):
         """Record outcome and feed to confidence scorer + database."""

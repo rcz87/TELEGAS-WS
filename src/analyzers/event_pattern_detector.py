@@ -252,9 +252,16 @@ class EventPatternDetector:
             # Calculate volumes
             recent_volume = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in recent_trades)
             historical_volume = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in historical_trades)
-            
-            # Calculate average per minute
-            avg_volume_per_minute = historical_volume / 5
+
+            # Calculate average per minute based on actual data span
+            import time as _time
+            now_ts = _time.time()
+            oldest_ts = min(
+                (float(t.get("time", now_ts * 1000)) / 1000 for t in historical_trades),
+                default=now_ts
+            )
+            actual_minutes = max((now_ts - oldest_ts) / 60, 1.0)
+            avg_volume_per_minute = historical_volume / actual_minutes
             
             if avg_volume_per_minute == 0:
                 return None
