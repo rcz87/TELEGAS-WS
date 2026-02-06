@@ -37,7 +37,6 @@ import uvicorn
 # Import all components
 from src.connection.websocket_client import WebSocketClient
 from src.dashboard import api as dashboard_api
-from src.processors.message_parser import MessageParser
 from src.processors.data_validator import DataValidator
 from src.processors.buffer_manager import BufferManager
 from src.analyzers.stop_hunt_detector import StopHuntDetector
@@ -83,7 +82,6 @@ class TeleglasPro:
         analysis_config = config.get('analysis', {})
         
         # Processors
-        self.message_parser = MessageParser()
         self.data_validator = DataValidator()
         self.buffer_manager = BufferManager(
             max_liquidations=buffers_config.get('max_liquidations', 1000),
@@ -638,7 +636,17 @@ class TeleglasPro:
             # Update uptime
             uptime = (datetime.now() - self.start_time).total_seconds()
             self.stats['uptime_seconds'] = int(uptime)
-            
+
+            # Collect analyzer stats for dashboard visibility
+            self.stats['analyzers'] = {
+                'stop_hunt': self.stop_hunt_detector.get_stats(),
+                'order_flow': self.order_flow_analyzer.get_stats(),
+                'events': self.event_detector.get_stats(),
+                'validator': self.signal_validator.get_stats(),
+                'confidence': self.confidence_scorer.get_overall_stats(),
+                'tracker': self.signal_tracker.get_overall_stats(),
+            }
+
             # Update dashboard
             dashboard_api.update_stats(self.stats)
             

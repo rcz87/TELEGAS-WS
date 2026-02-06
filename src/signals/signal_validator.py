@@ -179,8 +179,10 @@ class SignalValidator:
         Returns:
             Signal hash string
         """
-        # Create hash from key signal attributes
-        hash_input = f"{signal.symbol}_{signal.signal_type}_{signal.direction}_{int(signal.confidence)}"
+        # Bucket confidence into 5% bands for consistent dedup
+        # e.g. 73.2% and 76.8% both → 75, so treated as same signal
+        confidence_band = round(signal.confidence / 5) * 5
+        hash_input = f"{signal.symbol}_{signal.signal_type}_{signal.direction}_{confidence_band}"
         return hashlib.md5(hash_input.encode()).hexdigest()
     
     def is_duplicate(self, signal_hash: str) -> bool:
