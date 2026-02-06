@@ -372,11 +372,11 @@ class TeleglasPro:
         Coins not in the dashboard list are considered active by default
         (newly discovered coins). Only explicitly toggled-off coins are inactive.
         """
-        active_coins = dashboard_api.get_monitored_coins()
-        # If coin is in dashboard list, check its active status
-        # If coin is NOT in dashboard list (new discovery), treat as active
-        all_dashboard_symbols = [c["symbol"] for c in dashboard_api.system_state.get("coins", [])]
-        if symbol in all_dashboard_symbols:
+        with dashboard_api.state_lock:
+            all_coins = dashboard_api.system_state.get("coins", [])
+            all_symbols = [c["symbol"] for c in all_coins]
+            active_coins = [c["symbol"] for c in all_coins if c.get("active", True)]
+        if symbol in all_symbols:
             return symbol in active_coins
         return True  # New/undiscovered coins default to active
 
@@ -578,7 +578,7 @@ class TeleglasPro:
                     sl = price_zone[0] - (zone_spread * 0.3) if is_long else price_zone[1] + (zone_spread * 0.3)
                     risk = abs(entry - sl)
                     tp = entry + (risk * 2) if is_long else entry - (risk * 2)
-                    self.signal_tracker.track_signal(trading_signal, entry, sl, tp)
+                    tracked = self.signal_tracker.track_signal(trading_signal, entry, sl, tp)
 
                     # Save signal to database
                     try:
@@ -591,9 +591,7 @@ class TeleglasPro:
                             stop_loss=sl,
                             target_price=tp
                         )
-                        # Store DB ID on tracked signal for later outcome update
-                        if self.signal_tracker._pending:
-                            self.signal_tracker._pending[-1]._db_id = db_id
+                        tracked._db_id = db_id
                     except Exception:
                         pass  # DB save is non-critical
 

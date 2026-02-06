@@ -139,8 +139,10 @@ async def root():
         if API_TOKEN:
             # Inject token as meta tag so frontend can authenticate
             from fastapi.responses import HTMLResponse
+            import html as html_mod
             html_content = html_file.read_text()
-            token_meta = f'<meta name="api-token" content="{API_TOKEN}">'
+            safe_token = html_mod.escape(API_TOKEN, quote=True)
+            token_meta = f'<meta name="api-token" content="{safe_token}">'
             html_content = html_content.replace('</head>', f'    {token_meta}\n</head>', 1)
             return HTMLResponse(content=html_content)
         return FileResponse(str(html_file))
