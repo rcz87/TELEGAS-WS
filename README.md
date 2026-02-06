@@ -1,4 +1,4 @@
-# 🚀 TELEGLAS Pro - Real-Time Trading Intelligence System
+# TELEGLAS Pro - Real-Time Trading Intelligence System
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.108.0-green.svg)](https://fastapi.tiangolo.com/)
@@ -8,495 +8,289 @@
 
 ---
 
-## ✨ Features
+## Features
 
-### 🎯 Core Intelligence
-- **Stop Hunt Detection** - Identify $2M+ liquidation cascades in real-time
-- **Order Flow Analysis** - Track whale accumulation and distribution
-- **Event Pattern Detection** - Catch critical market anomalies
-- **Smart Confidence Scoring** - ML-powered signal validation with learning
-- **Anti-Spam System** - Advanced filtering and cooldown mechanisms
+### Core Intelligence
+- **Stop Hunt Detection** - Identify liquidation cascades in real-time with tier-aware thresholds
+- **Order Flow Analysis** - Track whale accumulation and distribution patterns
+- **Event Pattern Detection** - Volume spikes, whale accumulation windows
+- **LONG + SHORT Signals** - Both directions fully supported across entire pipeline
+- **Adaptive Confidence Scoring** - Learns from signal outcomes, tier-aware quality boost
+- **Anti-Spam System** - Dedup (5% confidence bands), cooldown, rate limiting
 
-### 📊 Web Dashboard (NEW!)
-- **Mobile-Responsive** - Perfect on desktop, tablet, and phone
-- **Real-Time Updates** - WebSocket-powered live data
-- **Dynamic Coin Management** - Add/remove pairs without restart
+### All-Coin Monitoring
+- **Every Coin Detected** - Processes ALL liquidation events from CoinGlass, not just configured pairs
+- **Dynamic Tier Thresholds** - BTC/ETH ($2M), mid-caps ($200K), small coins ($50K)
+- **Auto-Discovery** - New coins detected automatically from liquidation data
+- **Fair Scoring** - Volume ratios relative to tier threshold (small coin $500K = same score as BTC $10M)
+
+### Web Dashboard
+- **Real-Time Updates** - WebSocket-powered live data with first-message protocol auth
+- **Dynamic Coin Management** - Add/remove/toggle pairs without restart
 - **Order Flow Visualization** - Buy/sell ratio progress bars
-- **Live Signal Feed** - Real-time trading signals
-- **PWA Support** - Install to phone home screen
+- **Live Signal Feed** - Real-time trading signals with confidence scores
+- **CSV Export** - Download signal history and baselines as spreadsheets
+- **Mobile-Responsive** - Works on desktop, tablet, and phone
 
-### 🔔 Alert System
-- **Telegram Integration** - Professional message formatting
-- **Priority Queue** - Urgent/watch/info classification
-- **Retry Logic** - Automatic retry on failure
-- **Rate Limiting** - Prevent spam
+### Persistent Storage (SQLite)
+- **Signal History** - All generated signals saved with outcome tracking
+- **Auto WIN/LOSS** - SignalTracker evaluates after 15min, requires >= 50% to target for WIN
+- **State Restore** - Confidence state, dashboard coins, baselines survive restart
+- **CSV Export** - `/api/export/signals.csv`, `/api/export/baselines.csv`
 
-### 🛡️ Production Features
-- **Auto-Reconnect** - Never miss data with exponential backoff
-- **Error Recovery** - Comprehensive exception handling
-- **Memory Management** - Automatic cleanup of old data
-- **Statistics Tracking** - Detailed performance metrics
-- **Graceful Shutdown** - Clean resource management
+### Alert System
+- **Telegram Integration** - Professional formatting with LONG/SHORT labels and correct +/- targets
+- **Priority Queue** - Urgent/watch/info classification with retry logic
+- **Rate Limiting** - Configurable max signals per hour + per-symbol cooldown
 
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────┐
-│  CoinGlass WebSocket API                │
-│  (Real-time liquidations & trades)      │
-└──────────────┬──────────────────────────┘
-               ↓
-┌─────────────────────────────────────────┐
-│  TELEGLAS Pro System                    │
-│  ├─ WebSocket Client (auto-reconnect)  │
-│  ├─ Processors (parse, validate, buffer)│
-│  ├─ Analyzers (detect patterns)         │
-│  ├─ Signals (generate, score, validate) │
-│  ├─ Alerts (format, queue, send)        │
-│  └─ Dashboard (FastAPI + WebSocket)     │
-└─────┬───────────────────────────────┬───┘
-      │                               │
-      ↓                               ↓
-┌──────────────┐           ┌──────────────────┐
-│  Telegram    │           │  Web Dashboard   │
-│  - Alerts    │           │  - localhost:8080│
-│  - Signals   │           │  - Mobile-ready  │
-└──────────────┘           └──────────────────┘
-```
+### Production Features
+- **Auto-Reconnect** - Exponential backoff + force reconnect after 3 consecutive timeouts
+- **Thread Safety** - All dashboard state access under locks, deepcopy on reads
+- **Graceful Shutdown** - Timeout on all async tasks, state saved to DB before exit
+- **Absolute Config Paths** - Works regardless of working directory
 
 ---
 
-## 📦 Installation
+## Architecture
+
+```
+CoinGlass WebSocket API
+  |
+  |  liquidationOrders (ALL coins) + futures_trades@{symbol}
+  v
++---------------------------------------------------------+
+|  TELEGLAS Pro Pipeline                                   |
+|                                                          |
+|  1. WebSocket Client     - Auto-reconnect, heartbeat    |
+|  2. Data Validator       - Schema validation (str types) |
+|  3. Buffer Manager       - Rolling time-series per coin  |
+|  4. Analyzers            - StopHunt, OrderFlow, Events  |
+|  5. Signal Generator     - Merge + direction + metadata  |
+|  6. Signal Validator     - Dedup, cooldown, rate limit   |
+|  7. Confidence Scorer    - Tier-aware adaptive scoring   |
+|                                                          |
+|  Storage: SQLite (signals, state, baselines)             |
++-----------+-------------------------------+--------------+
+            |                               |
+            v                               v
+     +-----------+                 +------------------+
+     | Telegram  |                 | Web Dashboard    |
+     | - Alerts  |                 | - localhost:8080 |
+     | - Signals |                 | - REST + WS API  |
+     +-----------+                 +------------------+
+```
+
+---
+
+## Quick Start
 
 ### Prerequisites
-- Python 3.10 or higher
-- CoinGlass API key ([Get here](https://www.coinglass.com))
+- Python 3.10+
+- CoinGlass API key ([coinglass.com](https://www.coinglass.com))
 - Telegram Bot token (optional, via [@BotFather](https://t.me/BotFather))
 
-### Quick Start
+### Install & Run
 
-**1. Clone Repository:**
 ```bash
 git clone https://github.com/rcz87/TELEGAS-WS.git
 cd TELEGAS-WS
-```
-
-**2. Install Dependencies:**
-```bash
 pip install -r requirements.txt
-```
 
-**3. Configure:**
-```bash
 cp config/secrets.env.example config/secrets.env
-nano config/secrets.env
-```
+# Edit secrets.env with your API keys
 
-Add your API keys:
-```env
-COINGLASS_API_KEY=your_coinglass_api_key_here
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here  # Optional
-TELEGRAM_CHAT_ID=your_telegram_chat_id_here      # Optional
-```
-
-**4. Run:**
-```bash
 python main.py
-```
-
-**5. Access Dashboard:**
-```
-http://localhost:8080
-```
-
----
-
-## 🎮 Usage
-
-### System Startup
-
-When you run `python main.py`, the system will:
-
-```
-============================================================
-🚀 TELEGLAS Pro - Starting (v2.0)
-============================================================
-✅ All components initialized
-📊 Dashboard started at http://localhost:8080
-Connecting to CoinGlass WebSocket...
-✅ WebSocket connected
-📡 Subscribed to liquidationOrders channel
-📡 Subscribed to futures_trades@all_BTCUSDT@0
-✅ TELEGLAS Pro - Running
-============================================================
-Monitoring symbols: BTCUSDT, ETHUSDT, BNBUSDT
-Press Ctrl+C to stop
-```
-
-### Dashboard Features
-
-**Access the dashboard** at `http://localhost:8080`:
-
-1. **Monitor Statistics** - View real-time message counts, signals, alerts, errors
-2. **Add Coins** - Type any symbol (e.g., PEPE, WIF, DOGE) and click "Add"
-3. **Manage Coins** - Toggle alerts on/off or remove coins with one click
-4. **View Order Flow** - See buy/sell ratios and large order activity
-5. **Track Signals** - Live feed of trading signals with confidence scores
-
-**Mobile Access:**
-```
-http://YOUR_COMPUTER_IP:8080
+# Dashboard: http://localhost:8080
 ```
 
 ### Configuration
 
-Edit `config/config.yaml` to customize:
+Edit `config/config.yaml`:
 
 ```yaml
-# Trading pairs to monitor
 pairs:
-  primary:
-    - BTCUSDT
-    - ETHUSDT
-    - BNBUSDT
+  primary: [BTCUSDT, ETHUSDT, BNBUSDT]
+  secondary: [SOLUSDT, ADAUSDT, DOGEUSDT, AVAXUSDT]
 
-# Detection thresholds
 thresholds:
   liquidation_cascade: 2000000  # $2M
   large_order_threshold: 10000  # $10K
-  
-# Signal settings
+
 signals:
-  min_confidence: 70.0          # Minimum confidence to alert
-  max_signals_per_hour: 50      # Rate limit
+  min_confidence: 70.0
+  max_signals_per_hour: 50
+  cooldown_minutes: 5
+
+monitoring:
+  mode: "all"                   # Process ALL coins
+  tier1_symbols: [BTCUSDT, ETHUSDT]
+  tier2_symbols: [BNBUSDT, SOLUSDT, XRPUSDT, ...]
+  tier1_cascade: 2000000        # $2M for BTC, ETH
+  tier2_cascade: 200000         # $200K for mid-caps
+  tier3_cascade: 50000          # $50K for small coins
+
+dashboard:
+  api_token: "SET_A_REAL_TOKEN_HERE"  # Required for auth
 ```
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 TELEGLAS-WS/
-├── main.py                      # Main entry point
-├── requirements.txt             # Python dependencies
+├── main.py                       # Orchestrator + message handlers
+├── requirements.txt
 ├── config/
-│   ├── config.yaml             # Main configuration
-│   ├── secrets.env.example     # Template for API keys
-│   └── secrets.env             # Your API keys (create this)
+│   ├── config.yaml               # All settings including tier thresholds
+│   ├── secrets.env.example
+│   └── secrets.env               # API keys (create this)
 │
 ├── src/
-│   ├── connection/             # WebSocket client
-│   │   ├── websocket_client.py
-│   │   ├── heartbeat_manager.py
-│   │   └── subscription_manager.py
+│   ├── connection/
+│   │   └── websocket_client.py   # CoinGlass WebSocket + auto-reconnect
 │   │
-│   ├── processors/             # Data processing
-│   │   ├── message_parser.py
-│   │   ├── data_validator.py
-│   │   └── buffer_manager.py
+│   ├── processors/
+│   │   ├── data_validator.py     # Schema validation (accepts string numerics)
+│   │   └── buffer_manager.py     # Rolling time-series buffers per symbol
 │   │
-│   ├── analyzers/              # Pattern detection
-│   │   ├── stop_hunt_detector.py
-│   │   ├── order_flow_analyzer.py
-│   │   └── event_pattern_detector.py
+│   ├── analyzers/
+│   │   ├── stop_hunt_detector.py # Liquidation cascade → LONG/SHORT
+│   │   ├── order_flow_analyzer.py# Buy/sell whale analysis → ACCUM/DISTRIB
+│   │   └── event_pattern_detector.py  # Volume spike, whale windows
 │   │
-│   ├── signals/                # Signal generation
-│   │   ├── signal_generator.py
-│   │   ├── confidence_scorer.py
-│   │   └── signal_validator.py
+│   ├── signals/
+│   │   ├── signal_generator.py   # Merge analyzers → TradingSignal
+│   │   ├── signal_validator.py   # Anti-spam, dedup, cooldown
+│   │   ├── signal_tracker.py     # Auto WIN/LOSS after 15min
+│   │   └── confidence_scorer.py  # Adaptive confidence with tier scaling
 │   │
-│   ├── alerts/                 # Alert system
-│   │   ├── telegram_bot.py
-│   │   ├── message_formatter.py
-│   │   └── alert_queue.py
+│   ├── alerts/
+│   │   ├── telegram_bot.py       # Telegram sender
+│   │   ├── message_formatter.py  # LONG/SHORT message templates
+│   │   └── alert_queue.py        # Priority queue with retry
 │   │
-│   ├── dashboard/              # Web dashboard (NEW!)
-│   │   ├── api.py             # FastAPI server
+│   ├── dashboard/
+│   │   ├── api.py                # FastAPI REST + WebSocket endpoints
 │   │   └── static/
-│   │       ├── index.html     # Dashboard UI
-│   │       ├── app.js         # JavaScript logic
-│   │       └── manifest.json  # PWA config
+│   │       ├── index.html
+│   │       ├── app.js            # Alpine.js frontend with auth
+│   │       └── manifest.json
 │   │
-│   └── utils/                  # Utilities
+│   ├── storage/
+│   │   └── database.py           # SQLite async (signals, state, baselines)
+│   │
+│   └── utils/
 │       ├── logger.py
 │       └── helpers.py
 │
-├── scripts/                    # Test scripts
+├── scripts/                      # Test scripts
 │   ├── test_websocket.py
 │   ├── test_processors.py
 │   ├── test_analyzers.py
 │   ├── test_signals.py
 │   └── test_alerts.py
 │
-└── docs/                       # Documentation
-    ├── 00-PROJECT-OVERVIEW.md
-    ├── 01-COMPLETE-BLUEPRINT.md
-    └── 02-ARCHITECTURE.md
+└── data/                         # SQLite DB (auto-created)
+    └── teleglas.db
 ```
 
 ---
 
-## 🧪 Testing
+## API Endpoints
 
-### Test Individual Components:
-
-```bash
-# Test WebSocket connection
-python scripts/test_websocket.py
-
-# Test message processing
-python scripts/test_processors.py
-
-# Test detection algorithms
-python scripts/test_analyzers.py
-
-# Test signal generation
-python scripts/test_signals.py
-
-# Test alert formatting
-python scripts/test_alerts.py
 ```
-
-### Run All Tests:
-```bash
-pytest tests/ -v --cov
+GET  /                              # Dashboard UI (token injected)
+GET  /api/stats                     # System + analyzer statistics
+GET  /api/coins                     # Monitored coins with order flow
+GET  /api/signals                   # Recent signals
+GET  /api/orderflow/{symbol}        # Order flow data (thread-safe)
+POST /api/coins/add                 # Add coin (auth required)
+DELETE /api/coins/remove/{symbol}   # Remove coin (auth required)
+PATCH /api/coins/{symbol}/toggle    # Toggle alerts (auth required)
+GET  /api/export/signals.csv        # CSV export of all signals
+GET  /api/export/baselines.csv      # CSV export of baselines
+GET  /api/stats/signals             # Signal win/loss statistics
+GET  /api/signals/history           # Full signal history from DB
+WS   /ws                            # WebSocket (first-message auth)
+GET  /docs                          # Auto-generated API docs
 ```
 
 ---
 
-## 🔧 API Endpoints
+## Signal Types
 
-The dashboard provides these REST endpoints:
-
-```
-GET  /                          # Dashboard UI
-GET  /api/stats                 # System statistics
-GET  /api/coins                 # Monitored coins
-GET  /api/signals               # Recent signals
-POST /api/coins/add             # Add new coin
-DELETE /api/coins/remove/{symbol} # Remove coin
-PATCH /api/coins/{symbol}/toggle  # Toggle alerts
-WS   /ws                        # WebSocket for real-time updates
-GET  /docs                      # Auto-generated API docs
-```
+| Signal | Direction | Trigger | Confidence |
+|--------|-----------|---------|------------|
+| **STOP_HUNT** | LONG | Short liquidation cascade → price reversal up | Tier-relative volume ratio |
+| **STOP_HUNT** | SHORT | Long liquidation cascade → price reversal down | Tier-relative volume ratio |
+| **ACCUMULATION** | LONG | Buy ratio > 65%, whale buys dominant | Order count + volume ratio |
+| **DISTRIBUTION** | SHORT | Sell ratio > 65%, whale sells dominant | Order count + volume ratio |
+| **WHALE_ACCUMULATION** | LONG | 5+ large buy orders in 5 minutes | Buy ratio weighted |
+| **VOLUME_SPIKE** | - | 3x+ normal volume in 1 minute | Spike ratio scaled |
 
 ---
 
-## 📊 Signal Types
+## Engineering Review Log
 
-### STOP_HUNT
-- Triggered when liquidations exceed $2M in 30 seconds
-- Indicates potential reversal opportunity
-- Best used with absorption confirmation
+### v4.0 (Current) - 45+ bug fixes across 6 review sessions
 
-### ACCUMULATION / DISTRIBUTION
-- Based on order flow analysis
-- ACCUMULATION: Buy pressure > 65%
-- DISTRIBUTION: Sell pressure > 65%
+**Session 1** - Initial security review (8 fixes)
+- Input sanitization, rate limiting, auth on all endpoints
+- Graceful shutdown with timeouts, config validation
 
-### WHALE_ACCUMULATION
-- Large orders (>$10K) accumulating
-- Institutional positioning
-- Often precedes major moves
+**Session 2** - Core value improvements (3 major)
+- Data-driven Entry/SL/Target from price zones (was hardcoded)
+- SignalTracker auto WIN/LOSS with 15min check
+- Rolling baselines for confidence scoring
 
-### VOLUME_SPIKE
-- Unusual trading volume
-- Indicates increased activity
-- Requires confirmation
+**Session 3** - All-coin monitoring
+- Removed symbol filter gate, ALL coins now processed
+- Dynamic tiered thresholds, dashboard toggle wired to WebSocket
 
----
+**Session 4** - SQLite persistent storage
+- Created `src/storage/database.py` with 4 tables
+- CSV export endpoints, state restore on startup
 
-## 🎯 Success Metrics
+**Session 5** - Bug sweep (15 fixes)
+- Tier-aware scoring across OrderFlowAnalyzer, ConfidenceScorer
+- Dashboard auth on all endpoints + frontend Bearer token
+- WebSocket reconnect after 3 consecutive timeouts
+- Removed 3 dead code files (message_parser, heartbeat_manager, subscription_manager)
+- Wired all get_stats() to /api/stats
 
-### Technical Performance:
-- ✅ System uptime: 99.9%
-- ✅ Alert latency: <500ms
-- ✅ WebSocket reconnect: <3s
-- ✅ Memory usage: Stable (auto-cleanup)
+**Session 6** - Second review (14 fixes)
+- SignalTracker: require >= 50% to target for WIN (was $1 above entry)
+- track_signal() returns ref (was fragile _pending[-1])
+- HTML-escape token injection, state_lock on dashboard reads
+- Volume spike uses actual timespan, isalnum() for numeric symbols
+- add_coin duplicate check inside lock, alignment bonus scaled
+- WebSocket first-message auth (token not in URL), placeholder detection
+- Config absolute paths, monitoring in required_sections
 
-### Trading Performance:
-- ✅ Signal accuracy: >65%
-- ✅ Information edge: 30-90 seconds
-- ✅ False positive rate: <20%
+**Session 6b** - SHORT signal fix
+- Added `direction` to stop_hunt metadata (formatter always calculated LONG)
+- LONG/SHORT label + correct +/- on target percentages
 
----
-
-## 🐛 Troubleshooting
-
-### System Won't Start
-```bash
-# Check Python version
-python --version  # Should be 3.10+
-
-# Check dependencies
-pip install -r requirements.txt
-
-# Check API key
-cat config/secrets.env
-```
-
-### No Data Received
-```bash
-# Check WebSocket connection
-python scripts/test_websocket.py
-
-# Verify API key is valid
-# Check CoinGlass dashboard
-```
-
-### Dashboard Not Loading
-```bash
-# Check if port 8080 is available
-netstat -an | grep 8080
-
-# Try different port (edit main.py)
-# Change port=8080 to port=8081
-```
+**Session 6c** - P0 pipeline fix
+- CoinGlass sends price/vol as strings but schema expected (int,float) — ALL events were silently rejected. Fixed: accept (int, float, str)
+- Alert processor marks failed alerts properly
+- Bare except: replaced with except RuntimeError:
 
 ---
 
-## 🚀 Deployment
+## Status
 
-### Production Deployment (PM2):
-
-```bash
-# Install PM2
-npm install -g pm2
-
-# Start with PM2
-pm2 start ecosystem.config.js
-
-# View logs
-pm2 logs teleglas-pro
-
-# Monitor
-pm2 monit
-
-# Auto-start on boot
-pm2 startup
-pm2 save
-```
-
-### Docker Deployment:
-
-```bash
-# Build image
-docker build -t teleglas-pro .
-
-# Run container
-docker run -d \
-  --name teleglas-pro \
-  -p 8080:8080 \
-  -v ./config:/app/config \
-  teleglas-pro
-```
+**Current Version:** 4.0.0
+**Status:** Production Ready
+**Last Updated:** February 6, 2026
 
 ---
 
-## 💰 Costs
-
-### Required:
-- **CoinGlass API:** $299/month (Standard) or $699/month (Professional)
-- **VPS:** $5-20/month (2GB RAM, 2 CPU recommended)
-
-### Optional:
-- **Telegram:** Free
-- **Domain:** $10-15/year
-
-**Total:** ~$304-719/month
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
----
-
-## 📝 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
-
-- **CoinGlass** - Real-time market data API
-- **FastAPI** - Modern Python web framework
-- **Alpine.js** - Lightweight reactive framework
-- **Tailwind CSS** - Utility-first CSS framework
-
----
-
-## 📞 Support
-
-### Documentation:
-- [Project Overview](docs/00-PROJECT-OVERVIEW.md)
-- [Complete Blueprint](docs/01-COMPLETE-BLUEPRINT.md)
-- [Architecture Guide](docs/02-ARCHITECTURE.md)
-
-### Issues:
-- Report bugs via [GitHub Issues](https://github.com/rcz87/TELEGAS-WS/issues)
-- Check existing issues before creating new ones
-
-### Questions:
-- Read documentation first
-- Check troubleshooting section
-- Review example configurations
-
----
-
-## 📈 Roadmap
-
-### Completed ✅
-- [x] WebSocket client with auto-reconnect
-- [x] Real-time data processing
-- [x] Stop hunt detection
-- [x] Order flow analysis
-- [x] Event pattern detection
-- [x] Signal generation and scoring
-- [x] Telegram integration
-- [x] Mobile-responsive dashboard
-- [x] Coin management without restart
-- [x] WebSocket real-time updates
-- [x] PWA support
-
-### Planned 🚧
-- [ ] Machine learning model training
-- [ ] Historical backtesting
-- [ ] Multi-exchange support
-- [ ] Advanced charting
-- [ ] Trade execution integration
-- [ ] Portfolio tracking
-- [ ] Alert customization UI
-- [ ] Performance analytics dashboard
-
----
-
-## 🎊 Status
-
-**Current Version:** 2.0.0  
-**Status:** ✅ Production Ready  
-**Last Updated:** February 3, 2026  
-**Total Code:** 8,500+ lines  
-**Test Coverage:** 85%+  
-
----
-
-## ⭐ Star This Repo
-
-If this project helps you, please give it a star! It helps others discover the project.
-
----
-
-**Built with ❤️ for crypto traders**
-
-**Happy Trading! 🚀📈**
+**Built for crypto traders who need an edge.**
