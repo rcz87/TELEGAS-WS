@@ -299,6 +299,7 @@ class SignalGenerator:
         
         if stop_hunt_signal:
             metadata['stop_hunt'] = {
+                'direction': stop_hunt_signal.direction,
                 'total_volume': stop_hunt_signal.total_volume,
                 'liquidation_count': stop_hunt_signal.liquidation_count,
                 'price_zone': stop_hunt_signal.price_zone,
