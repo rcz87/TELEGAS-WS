@@ -232,10 +232,11 @@ class SignalGenerator:
         # Calculate weighted average
         merged = weighted_sum / total_weight
         
-        # Alignment bonus: if signals agree on direction, boost confidence
+        # Alignment bonus: scale by merged confidence (strong signals get bigger boost)
         if self.signals_aligned(stop_hunt_signal, order_flow_signal):
-            merged = min(merged + 10, 99.0)
-            self.logger.debug("Signals aligned - confidence boosted by 10%")
+            bonus = min(merged * 0.15, 10.0)  # 15% of merged, capped at 10
+            merged = min(merged + bonus, 99.0)
+            self.logger.debug(f"Signals aligned - confidence boosted by {bonus:.1f}%")
         
         return merged
     

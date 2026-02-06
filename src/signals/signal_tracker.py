@@ -148,12 +148,12 @@ class SignalTracker:
             current_price = self.get_current_price(tracked.symbol)
 
             if current_price is None or current_price <= 0:
-                # No price data available, extend check window by 5 min
-                if now - tracked.timestamp < self.check_interval * 3:
+                # No price data — extend check window (max 3 extensions = 15 min extra)
+                max_age = self.check_interval + 900  # original wait + 15 min max extension
+                if now - tracked.timestamp < max_age:
                     tracked.check_after = now + 300
                     still_pending.append(tracked)
                 else:
-                    # Too old, mark as neutral
                     tracked.outcome = "NEUTRAL"
                     tracked.exit_price = 0
                     self._record_outcome(tracked)

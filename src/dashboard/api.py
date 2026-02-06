@@ -250,11 +250,7 @@ async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Dep
     # Reconstruct with USDT
     symbol = symbol + "USDT"
     
-    # Check if already exists
-    if any(coin["symbol"] == symbol for coin in system_state["coins"]):
-        raise HTTPException(status_code=400, detail=f"{symbol} is already monitored")
-    
-    # Add to coins list (thread-safe)
+    # Add to coins list (thread-safe: check + append under same lock)
     new_coin = {
         "symbol": symbol,
         "active": True,
@@ -264,9 +260,10 @@ async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Dep
         "large_sells": 0,
         "last_update": "just added"
     }
-    
-    # CRITICAL FIX Bug #5: Thread-safe write with lock
+
     with state_lock:
+        if any(coin["symbol"] == symbol for coin in system_state["coins"]):
+            raise HTTPException(status_code=400, detail=f"{symbol} is already monitored")
         system_state["coins"].append(new_coin)
 
     # Request trade channel subscription from main.py
