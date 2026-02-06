@@ -85,9 +85,11 @@ class TeleglasPro:
         )
         
         # Analyzers (using correct config paths)
+        detection_config = config.get('detection', {})
         self.stop_hunt_detector = StopHuntDetector(
             self.buffer_manager,
-            threshold=thresholds.get('liquidation_cascade', 2_000_000)
+            threshold=thresholds.get('liquidation_cascade', 2_000_000),
+            absorption_min_order_usd=detection_config.get('absorption_min_order_usd', 5000)
         )
         self.order_flow_analyzer = OrderFlowAnalyzer(
             self.buffer_manager,
@@ -140,6 +142,7 @@ class TeleglasPro:
         # Debouncing (FIX: Prevent task explosion)
         self.analysis_locks = {}  # Per-symbol locks
         self.last_analysis = {}   # Per-symbol last analysis time
+        self._analysis_tasks: set = set()
         
         # Statistics
         self.stats = {
@@ -273,8 +276,10 @@ class TeleglasPro:
                     
                     # Trigger analysis for this symbol only (debounced)
                     if symbol in self.symbols:
-                        asyncio.create_task(self.analyze_and_alert(symbol))
-                        
+                        task = asyncio.create_task(self.analyze_and_alert(symbol))
+                        self._analysis_tasks.add(task)
+                        task.add_done_callback(self._analysis_tasks.discard)
+
         except Exception as e:
             self.logger.error(f"Error handling liquidation: {e}")
             self.stats['errors'] += 1
@@ -306,8 +311,10 @@ class TeleglasPro:
                     
                     # Trigger analysis for this symbol (debounced)
                     if symbol in self.symbols:
-                        asyncio.create_task(self.analyze_and_alert(symbol))
-                        
+                        task = asyncio.create_task(self.analyze_and_alert(symbol))
+                        self._analysis_tasks.add(task)
+                        task.add_done_callback(self._analysis_tasks.discard)
+
         except Exception as e:
             self.logger.error(f"Error handling trade: {e}")
             self.stats['errors'] += 1

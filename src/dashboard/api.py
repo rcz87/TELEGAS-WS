@@ -12,7 +12,7 @@ Provides REST API and WebSocket endpoints for:
 - Mobile-responsive web interface
 """
 
-from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,10 +21,49 @@ import asyncio
 import json
 import re
 import threading
+import time
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 from typing import List, Optional
 from pathlib import Path
+import yaml
+
+# Load dashboard config
+_config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+_dashboard_config = {}
+if _config_path.exists():
+    with open(_config_path) as _f:
+        _full_config = yaml.safe_load(_f)
+        _dashboard_config = _full_config.get("dashboard", {})
+
+API_TOKEN = _dashboard_config.get("api_token", "")
+CORS_ORIGINS = _dashboard_config.get("cors_origins", ["http://localhost:3000"])
+
+async def verify_token(authorization: str = Header(None)):
+    """Simple Bearer token auth."""
+    if not API_TOKEN:
+        return True  # Skip auth jika token tidak di-set di config
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    if authorization.replace("Bearer ", "") != API_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+    return True
+
+# Rate limiting
+_rate_limit_store: dict = defaultdict(list)
+_RATE_LIMIT = 30  # requests per minute
+
+async def check_rate_limit(request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    # Cleanup old entries
+    _rate_limit_store[client_ip] = [
+        t for t in _rate_limit_store[client_ip] if now - t < 60
+    ]
+    if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many requests")
+    _rate_limit_store[client_ip].append(now)
 
 # Create FastAPI app
 app = FastAPI(
@@ -36,7 +75,7 @@ app = FastAPI(
 # CORS middleware for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -157,7 +196,7 @@ async def get_order_flow(symbol: str):
     return flow
 
 @app.post("/api/coins/add")
-async def add_coin(request: AddCoinRequest):
+async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Depends(check_rate_limit)):
     """
     Add a new coin to monitoring with input validation
     
@@ -218,7 +257,7 @@ async def add_coin(request: AddCoinRequest):
     return {"success": True, "coin": new_coin}
 
 @app.delete("/api/coins/remove/{symbol}")
-async def remove_coin(symbol: str):
+async def remove_coin(symbol: str, _auth=Depends(verify_token), _rl=Depends(check_rate_limit)):
     """
     Remove a coin from monitoring (thread-safe)
     
@@ -276,15 +315,21 @@ async def toggle_coin(symbol: str, request: ToggleCoinRequest):
 async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint for real-time updates
-    
+
     CRITICAL FIX Bug #2: Wait for system initialization before sending state
     to prevent race condition where dashboard receives incomplete coin data.
-    
+
     Sends:
     - Initial state on connection (after init complete)
     - Real-time updates for stats, signals, order flow
     - Coin add/remove/toggle events
     """
+    # Optional auth check
+    if API_TOKEN:
+        token = websocket.query_params.get("token", "")
+        if token != API_TOKEN:
+            await websocket.close(code=4003, reason="Invalid token")
+            return
     await websocket.accept()
     active_connections.append(websocket)
     

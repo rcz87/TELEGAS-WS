@@ -64,6 +64,18 @@ logging:
   max_size_mb: 10
   backup_count: 5
 
+# Detection Fine-Tuning
+detection:
+  absorption_min_order_usd: 5000   # Minimum order size to count as absorption
+
+# Dashboard Settings
+dashboard:
+  api_token: "GANTI_DENGAN_TOKEN_RANDOM_YANG_PANJANG"
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8080"
+    - "http://31.97.107.243:8080"
+
 # Analysis Windows
 analysis:
   stop_hunt_window: 30           # Seconds
