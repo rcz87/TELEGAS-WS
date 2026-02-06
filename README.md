@@ -13,7 +13,7 @@
 ### Core Intelligence
 - **Stop Hunt Detection** - Identify liquidation cascades in real-time with tier-aware thresholds
 - **Order Flow Analysis** - Track whale accumulation and distribution patterns
-- **Event Pattern Detection** - Volume spikes, whale accumulation windows
+- **Event Pattern Detection** - Volume spikes, whale accumulation & distribution windows
 - **LONG + SHORT Signals** - Both directions fully supported across entire pipeline
 - **Adaptive Confidence Scoring** - Learns from signal outcomes, tier-aware quality boost
 - **Anti-Spam System** - Dedup (5% confidence bands), cooldown, rate limiting
@@ -44,7 +44,7 @@
 - **Rate Limiting** - Configurable max signals per hour + per-symbol cooldown
 
 ### Production Features
-- **Auto-Reconnect** - Exponential backoff + force reconnect after 3 consecutive timeouts
+- **Auto-Reconnect** - Iterative loop with exponential backoff + force reconnect after 3 consecutive timeouts
 - **Thread Safety** - All dashboard state access under locks, deepcopy on reads
 - **Graceful Shutdown** - Timeout on all async tasks, state saved to DB before exit
 - **Absolute Config Paths** - Works regardless of working directory
@@ -113,8 +113,8 @@ pairs:
   secondary: [SOLUSDT, ADAUSDT, DOGEUSDT, AVAXUSDT]
 
 thresholds:
-  liquidation_cascade: 2000000  # $2M
-  large_order_threshold: 10000  # $10K
+  liquidation_cascade: 2000000  # $2M (tier1, see monitoring for tier2/3)
+  large_order_threshold: 10000  # $10K tier1, $5K tier2, $2K tier3 (auto)
 
 signals:
   min_confidence: 70.0
@@ -139,11 +139,12 @@ dashboard:
 
 ### Authentication & Authorization
 - **Bearer Token Auth** - Protects all write operations (POST, DELETE, PATCH)
+- **Timing-Safe Token Comparison** - Uses `hmac.compare_digest` to prevent timing attacks
 - **First-Message WebSocket Auth** - Token sent after connect, not in URL (avoids log exposure)
 - **CORS Policy** - Restricted to specific origins
-- **Rate Limiting** - 30 requests per minute per IP address
+- **Rate Limiting** - 30 requests per minute per IP with automatic stale IP eviction
 - **Input Validation** - Regex validation + sanitization on all inputs
-- **Thread-Safe** - Lock-protected shared state access
+- **Thread-Safe** - Lock-protected shared state access, deepcopy on cross-thread reads
 - **Token Placeholder Detection** - Warns if default token not changed
 
 ### Security Configuration
@@ -256,6 +257,7 @@ GET  /docs                          # Auto-generated API docs
 | **ACCUMULATION** | LONG | Buy ratio > 65%, whale buys dominant | Order count + volume ratio |
 | **DISTRIBUTION** | SHORT | Sell ratio > 65%, whale sells dominant | Order count + volume ratio |
 | **WHALE_ACCUMULATION** | LONG | 5+ large buy orders in 5 minutes | Buy ratio weighted |
+| **WHALE_DISTRIBUTION** | SHORT | 5+ large sell orders in 5 minutes | Sell ratio weighted |
 | **VOLUME_SPIKE** | - | 3x+ normal volume in 1 minute | Spike ratio scaled |
 
 ---
@@ -305,6 +307,21 @@ GET  /docs                          # Auto-generated API docs
 - CoinGlass sends price/vol as strings but schema expected (int,float) — ALL events were silently rejected. Fixed: accept (int, float, str)
 - Alert processor marks failed alerts properly
 - Bare except: replaced with except RuntimeError:
+
+**Session 7** - Comprehensive review & bug sweep (16 files, P0/P1/P2)
+- P0: Fixed infinite retry loop in alert_queue (retry_count never incremented)
+- P0: Converted recursive websocket reconnect to iterative loop (prevented RecursionError)
+- P0: Timing-safe token comparison (`hmac.compare_digest`), rate limiter IP eviction, thread-safe broadcast from sync thread
+- P0: Removed hardcoded VPS IP from config, scripts, and dashboard_preview
+- P1: Fixed SHORT entry level using wrong price zone boundary
+- P1: Added `threading.Lock` to buffer_manager for full thread safety
+- P1: Standardized all `datetime.now()` → `datetime.now(timezone.utc)` across 7 files
+- P1: Fixed volume spike self-dilution (excludes recent 1-min from baseline)
+- P2: Added WHALE_DISTRIBUTION detection (was only ACCUMULATION — bullish bias)
+- P2: Tier-aware `large_order_threshold` ($10K/$5K/$2K by tier)
+- P2: Reusable `aiohttp.ClientSession` in telegram_bot (was creating per message)
+- P2: Atomic transactions + connection guard in database.py
+- P2: Consistent `vol` field name across all analyzers (was mixed `volume_usd`/`vol`)
 
 ---
 
