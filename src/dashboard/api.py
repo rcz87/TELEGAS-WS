@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
+import hmac
 import json
 import queue
 import re
@@ -25,7 +26,7 @@ import threading
 import time
 from collections import defaultdict
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from pathlib import Path
 import yaml
@@ -51,27 +52,39 @@ API_TOKEN = _raw_token
 CORS_ORIGINS = _dashboard_config.get("cors_origins", ["http://localhost:3000"])
 
 async def verify_token(authorization: str = Header(None)):
-    """Simple Bearer token auth."""
+    """Simple Bearer token auth with constant-time comparison."""
     if not API_TOKEN:
-        return True  # Skip auth jika token tidak di-set di config
+        return True  # Skip auth if token not set in config
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
-    if authorization.replace("Bearer ", "") != API_TOKEN:
+    provided = authorization.replace("Bearer ", "")
+    if not hmac.compare_digest(provided, API_TOKEN):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
 
 # Rate limiting
 _rate_limit_store: dict = defaultdict(list)
 _RATE_LIMIT = 30  # requests per minute
+_RATE_LIMIT_MAX_IPS = 10000  # evict oldest IPs if store exceeds this
 
 async def check_rate_limit(request: Request):
     client_ip = request.client.host if request.client else "unknown"
     now = time.time()
-    # Cleanup old entries
+    # Cleanup old entries for this IP
     _rate_limit_store[client_ip] = [
         t for t in _rate_limit_store[client_ip] if now - t < 60
     ]
-    if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT:
+    # Evict empty IPs to prevent unbounded memory growth
+    if not _rate_limit_store[client_ip]:
+        del _rate_limit_store[client_ip]
+    if len(_rate_limit_store) > _RATE_LIMIT_MAX_IPS:
+        # Remove oldest IPs (those with oldest last-request)
+        sorted_ips = sorted(_rate_limit_store.keys(),
+                            key=lambda ip: max(_rate_limit_store[ip]) if _rate_limit_store[ip] else 0)
+        for ip in sorted_ips[:len(_rate_limit_store) - _RATE_LIMIT_MAX_IPS]:
+            del _rate_limit_store[ip]
+    entries = _rate_limit_store.get(client_ip, [])
+    if len(entries) >= _RATE_LIMIT:
         raise HTTPException(status_code=429, detail="Too many requests")
     _rate_limit_store[client_ip].append(now)
 
@@ -103,6 +116,9 @@ state_lock = threading.Lock()
 # Thread-safe queue for subscription requests from dashboard → main.py
 # Items are dicts: {"action": "subscribe"|"unsubscribe", "symbol": "BTCUSDT"}
 _subscription_queue: queue.Queue = queue.Queue()
+
+# Event loop reference (set by startup event) for cross-thread broadcasting
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Database reference (set by main.py after init)
 _db = None
@@ -416,7 +432,7 @@ async def websocket_endpoint(websocket: WebSocket):
         try:
             # Wait for auth message within 5 seconds
             auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
-            if auth_msg.get("type") != "auth" or auth_msg.get("token") != API_TOKEN:
+            if auth_msg.get("type") != "auth" or not hmac.compare_digest(str(auth_msg.get("token", "")), API_TOKEN):
                 await websocket.send_json({"type": "error", "message": "Invalid token"})
                 await websocket.close(code=4003, reason="Invalid token")
                 return
@@ -426,23 +442,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
     active_connections.append(websocket)
     
-    # CRITICAL FIX: Wait for system initialization (max 3 seconds)
+    # Wait for system initialization (max 3 seconds)
     retry_count = 0
     while retry_count < 30:  # 30 * 0.1s = 3 seconds max wait
-        # Check if main system has initialized flag
         try:
-            # System is ready when coins are populated
-            if len(system_state["coins"]) > 0:
-                break
-        except:
+            with state_lock:
+                if len(system_state["coins"]) > 0:
+                    break
+        except Exception:
             pass
         await asyncio.sleep(0.1)
         retry_count += 1
-    
-    # Send initial state (now guaranteed to be complete)
+
+    # Send initial state (thread-safe copy)
+    with state_lock:
+        state_snapshot = deepcopy(system_state)
     await websocket.send_json({
         "type": "initial_state",
-        "data": system_state
+        "data": state_snapshot
     })
     
     try:
@@ -472,14 +489,14 @@ async def broadcast_update(event_type: str, data):
     message = {
         "type": event_type,
         "data": data,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
     
     disconnected = []
-    for connection in active_connections:
+    for connection in list(active_connections):
         try:
             await connection.send_json(message)
-        except:
+        except Exception:
             disconnected.append(connection)
     
     # Remove disconnected clients
@@ -506,83 +523,66 @@ def update_stats(stats: dict):
     with state_lock:
         system_state["stats"] = deepcopy(stats)
     
-    # Schedule broadcast (must be called from async context)
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(broadcast_update("stats_update", stats))
-    except RuntimeError:
-        pass  # No event loop running yet
+    # Schedule broadcast via stored event loop (safe from any thread)
+    _schedule_broadcast("stats_update", stats)
 
 def update_order_flow(symbol: str, flow_data: dict):
     """
     Update order flow for a symbol (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe write with lock
-    
+
     Called when new order flow data is available
-    
+
     Args:
         symbol: Trading pair symbol
         flow_data: Order flow data (buy_ratio, sell_ratio, large orders)
     """
-    # CRITICAL FIX: Thread-safe modification
     with state_lock:
         system_state["order_flow"][symbol] = {
             **flow_data,
-            "last_update": datetime.now().strftime("%H:%M:%S")
+            "last_update": datetime.now(timezone.utc).strftime("%H:%M:%S")
         }
-        
+
         # Also update in coins list
         coin = next((c for c in system_state["coins"] if c["symbol"] == symbol), None)
         if coin:
             coin.update(flow_data)
             coin["last_update"] = "just now"
-    
-    # Schedule broadcast
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(broadcast_update("order_flow_update", {
-                "symbol": symbol,
-                **flow_data
-            }))
-    except RuntimeError:
-        pass
+
+    _schedule_broadcast("order_flow_update", {"symbol": symbol, **flow_data})
 
 def add_signal(signal: dict):
     """
     Add a new signal to the dashboard (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe write with lock
-    
+
     Called when a new trading signal is generated
-    
+
     Args:
         signal: Signal data dictionary
     """
-    # CRITICAL FIX: Thread-safe modification
+    now = datetime.now(timezone.utc)
     with state_lock:
         signal_data = {
             "id": len(system_state["signals"]) + 1,
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "timestamp": datetime.now().isoformat(),
+            "time": now.strftime("%H:%M:%S"),
+            "timestamp": now.isoformat(),
             **signal
         }
-        
+
         system_state["signals"].append(signal_data)
-        
+
         # Keep only last 200 signals
         if len(system_state["signals"]) > 200:
             system_state["signals"] = system_state["signals"][-200:]
-    
-    # Schedule broadcast
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(broadcast_update("new_signal", signal_data))
-    except RuntimeError:
-        pass
+
+    _schedule_broadcast("new_signal", signal_data)
+
+def _schedule_broadcast(event_type: str, data):
+    """Schedule an async broadcast from any thread using the stored event loop."""
+    if _event_loop and _event_loop.is_running():
+        _event_loop.call_soon_threadsafe(
+            asyncio.ensure_future,
+            broadcast_update(event_type, data)
+        )
 
 def get_monitored_coins() -> List[str]:
     """
@@ -647,6 +647,8 @@ def initialize_coins(initial_coins: List[str]):
 @app.on_event("startup")
 async def startup_event():
     """Run on application startup"""
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
     print("=" * 60)
     print("🚀 TELEGLAS Dashboard API Started")
     print("=" * 60)
@@ -659,10 +661,10 @@ async def startup_event():
 async def shutdown_event():
     """Run on application shutdown"""
     # Close all WebSocket connections
-    for connection in active_connections:
+    for connection in list(active_connections):
         try:
             await connection.close()
-        except:
+        except Exception:
             pass
     active_connections.clear()
     print("👋 Dashboard API Shutdown Complete")

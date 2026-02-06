@@ -50,6 +50,11 @@ class Database:
         await self._create_tables()
         self.logger.info(f"Database connected: {self.db_path}")
 
+    def _ensure_connected(self):
+        """Raise if database not connected."""
+        if self._db is None:
+            raise RuntimeError("Database not connected. Call connect() first.")
+
     async def close(self):
         """Close database connection."""
         if self._db:
@@ -114,6 +119,7 @@ class Database:
                           stop_loss: float = 0, target_price: float = 0,
                           metadata: dict = None) -> int:
         """Save a new signal. Returns the signal ID."""
+        self._ensure_connected()
         cursor = await self._db.execute(
             """INSERT INTO signals
                (symbol, signal_type, direction, confidence,
@@ -219,14 +225,20 @@ class Database:
     # ==========================================================================
 
     async def save_dashboard_coins(self, coins: List[dict]):
-        """Save dashboard coin states (bulk replace)."""
-        await self._db.execute("DELETE FROM dashboard_coins")
-        for coin in coins:
-            await self._db.execute(
-                "INSERT INTO dashboard_coins (symbol, active, added_at) VALUES (?, ?, ?)",
-                (coin["symbol"], 1 if coin.get("active", True) else 0, time.time())
-            )
-        await self._db.commit()
+        """Save dashboard coin states (bulk replace, atomic transaction)."""
+        self._ensure_connected()
+        await self._db.execute("BEGIN")
+        try:
+            await self._db.execute("DELETE FROM dashboard_coins")
+            for coin in coins:
+                await self._db.execute(
+                    "INSERT INTO dashboard_coins (symbol, active, added_at) VALUES (?, ?, ?)",
+                    (coin["symbol"], 1 if coin.get("active", True) else 0, time.time())
+                )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
 
     async def load_dashboard_coins(self) -> List[dict]:
         """Load saved dashboard coin states."""

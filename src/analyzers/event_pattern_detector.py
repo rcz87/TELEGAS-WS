@@ -20,7 +20,7 @@ Algorithm:
 
 from typing import List, Optional
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..utils.logger import setup_logger
 
@@ -105,7 +105,7 @@ class EventPatternDetector:
             if not liquidations:
                 return None
 
-            total_volume = sum(float(liq.get("volume_usd", liq.get("vol", 0))) for liq in liquidations)
+            total_volume = sum(float(liq.get("vol", 0)) for liq in liquidations)
 
             if total_volume < threshold:
                 return None
@@ -131,7 +131,7 @@ class EventPatternDetector:
                 symbol=symbol,
                 description=description,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 data={
                     "total_volume": total_volume,
                     "liquidation_count": len(liquidations),
@@ -148,66 +148,85 @@ class EventPatternDetector:
             self.logger.error(f"Cascade detection failed: {e}")
             return None
     
+    def _get_large_order_threshold(self, symbol: str) -> float:
+        """Get tier-aware large order threshold for whale detection."""
+        if symbol in self._tier1_symbols:
+            return self.large_order_threshold  # $10K for BTC/ETH
+        elif symbol in self._tier2_symbols:
+            return self.large_order_threshold * 0.5  # $5K for mid-caps
+        else:
+            return self.large_order_threshold * 0.2  # $2K for small coins
+
     async def detect_whale_accumulation_window(self, symbol: str, min_large_orders: int = 5) -> Optional[EventSignal]:
         """
-        Detect whale accumulation window
-        
-        Pattern:
-        - Multiple large orders (>$10K) in 5 minutes
-        - Majority are buy orders
-        - Price relatively stable
-        
+        Detect whale accumulation OR distribution window.
+
+        Accumulation: >= 60% large orders are buys (LONG bias)
+        Distribution: >= 60% large orders are sells (SHORT bias)
+
+        Uses tier-aware large order threshold for fair detection across coin sizes.
+
         Args:
             symbol: Trading pair
             min_large_orders: Minimum large orders to detect (default 5)
-            
+
         Returns:
             EventSignal if detected, None otherwise
         """
         try:
             trades = self.buffer_manager.get_trades(symbol, time_window=300)
-            
+
             if not trades or len(trades) < 20:
                 return None
-            
-            # Count large orders
+
+            threshold = self._get_large_order_threshold(symbol)
             large_buys = 0
             large_sells = 0
-            
+
             for trade in trades:
-                vol = float(trade.get("volume_usd", trade.get("vol", 0)))
+                vol = float(trade.get("vol", 0))
                 side = int(trade.get("side", 0))
-                
-                if vol >= self.large_order_threshold:
+
+                if vol >= threshold:
                     if side == 2:  # Buy
                         large_buys += 1
                     elif side == 1:  # Sell
                         large_sells += 1
-            
+
             total_large = large_buys + large_sells
-            
+
             if total_large < min_large_orders:
                 return None
-            
-            # Check if majority are buys (accumulation)
-            if large_buys < total_large * 0.6:  # Less than 60% buys
-                return None
-            
-            # Calculate confidence
+
             buy_ratio = large_buys / total_large
-            confidence = 50 + (buy_ratio * 40)  # 50-90% range
-            
-            description = (
-                f"Whale accumulation window: {large_buys} large buy orders "
-                f"vs {large_sells} sells in 5 minutes"
-            )
-            
+
+            # Detect accumulation (majority buys)
+            if buy_ratio >= 0.6:
+                dominant_ratio = buy_ratio
+                event_type = "WHALE_ACCUMULATION"
+                description = (
+                    f"Whale accumulation window: {large_buys} large buy orders "
+                    f"vs {large_sells} sells in 5 minutes"
+                )
+            # Detect distribution (majority sells)
+            elif buy_ratio <= 0.4:
+                dominant_ratio = 1.0 - buy_ratio  # sell ratio
+                event_type = "WHALE_DISTRIBUTION"
+                description = (
+                    f"Whale distribution window: {large_sells} large sell orders "
+                    f"vs {large_buys} buys in 5 minutes"
+                )
+            else:
+                return None  # No clear direction
+
+            confidence = 50 + (dominant_ratio * 40)  # 50-90% range
+
             signal = EventSignal(
-                event_type="WHALE_ACCUMULATION",
+                event_type=event_type,
                 symbol=symbol,
                 description=description,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 data={
                     "large_buys": large_buys,
                     "large_sells": large_sells,
@@ -215,14 +234,14 @@ class EventPatternDetector:
                     "time_window": 300
                 }
             )
-            
+
             self._detections += 1
             self.logger.info(f"🐋 {description}")
-            
+
             return signal
-            
+
         except Exception as e:
-            self.logger.error(f"Accumulation window detection failed: {e}")
+            self.logger.error(f"Whale window detection failed: {e}")
             return None
     
     async def detect_volume_spike(self, symbol: str, spike_multiplier: float = 3.0) -> Optional[EventSignal]:
@@ -240,33 +259,42 @@ class EventPatternDetector:
             EventSignal if detected, None otherwise
         """
         try:
-            # Get recent trades (1 minute)
+            import time as _time
+
+            # Get recent trades (1 minute) - the potential spike window
             recent_trades = self.buffer_manager.get_trades(symbol, time_window=60)
-            
-            # Get historical trades (5 minutes)
+
+            # Get historical trades (5 minutes) for baseline
             historical_trades = self.buffer_manager.get_trades(symbol, time_window=300)
-            
+
             if not recent_trades or not historical_trades:
                 return None
-            
-            # Calculate volumes
-            recent_volume = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in recent_trades)
-            historical_volume = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in historical_trades)
 
-            # Calculate average per minute based on actual data span
-            import time as _time
+            recent_volume = sum(float(t.get("vol", 0)) for t in recent_trades)
+
+            # Exclude the recent 1-min window from historical to avoid self-dilution
+            now_ms = int(_time.time() * 1000)
+            cutoff_ms = now_ms - 60_000
+            baseline_trades = [t for t in historical_trades if t.get("timestamp", 0) < cutoff_ms]
+
+            if not baseline_trades:
+                return None
+
+            baseline_volume = sum(float(t.get("vol", 0)) for t in baseline_trades)
+
+            # Calculate actual time span of baseline data
             now_ts = _time.time()
             oldest_ts = min(
-                (float(t.get("time", now_ts * 1000)) / 1000 for t in historical_trades),
+                (float(t.get("timestamp", now_ts * 1000)) / 1000 for t in baseline_trades),
                 default=now_ts
             )
-            actual_minutes = max((now_ts - oldest_ts) / 60, 1.0)
-            avg_volume_per_minute = historical_volume / actual_minutes
-            
+            baseline_minutes = max((now_ts - 60 - oldest_ts) / 60, 1.0)
+            avg_volume_per_minute = baseline_volume / baseline_minutes
+
             if avg_volume_per_minute == 0:
                 return None
-            
-            # Check for spike
+
+            # Check for spike (no self-dilution now)
             spike_ratio = recent_volume / avg_volume_per_minute
             
             if spike_ratio < spike_multiplier:
@@ -284,7 +312,7 @@ class EventPatternDetector:
                 symbol=symbol,
                 description=description,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 data={
                     "recent_volume": recent_volume,
                     "avg_volume": avg_volume_per_minute,

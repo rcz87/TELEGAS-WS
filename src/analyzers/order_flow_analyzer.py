@@ -21,7 +21,7 @@ Algorithm:
 
 from typing import Optional, Tuple, List
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..utils.logger import setup_logger
 
@@ -133,8 +133,8 @@ class OrderFlowAnalyzer:
             
             buy_ratio = buy_volume / total_volume
             
-            # Step 3: Count large orders
-            large_buys, large_sells = self.count_large_orders(trades)
+            # Step 3: Count large orders (tier-aware threshold)
+            large_buys, large_sells = self.count_large_orders(trades, symbol=symbol)
             
             # Step 4: Determine signal type
             signal_type = self.determine_signal_type(buy_ratio, large_buys, large_sells)
@@ -166,7 +166,7 @@ class OrderFlowAnalyzer:
                 large_sells=large_sells,
                 signal_type=signal_type,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 total_trades=len(trades),
                 net_delta=net_delta
             )
@@ -204,8 +204,8 @@ class OrderFlowAnalyzer:
         
         for trade in trades:
             side = int(trade.get("side", 0))
-            vol = float(trade.get("volume_usd", trade.get("vol", 0)))
-            
+            vol = float(trade.get("vol", 0))
+
             if side == 2:  # Buy
                 buy_volume += vol
             elif side == 1:  # Sell
@@ -213,29 +213,40 @@ class OrderFlowAnalyzer:
         
         return (buy_volume, sell_volume)
     
-    def count_large_orders(self, trades: List[dict]) -> Tuple[int, int]:
+    def get_large_order_threshold(self, symbol: str) -> float:
+        """Get tier-aware large order threshold for fair whale detection."""
+        if symbol in self._tier1_symbols:
+            return self.large_order_threshold  # $10K for BTC/ETH
+        elif symbol in self._tier2_symbols:
+            return self.large_order_threshold * 0.5  # $5K for mid-caps
+        else:
+            return self.large_order_threshold * 0.2  # $2K for small coins
+
+    def count_large_orders(self, trades: List[dict], symbol: str = "") -> Tuple[int, int]:
         """
-        Count large buy and sell orders (whale activity)
-        
+        Count large buy and sell orders (whale activity) with tier-aware thresholds.
+
         Args:
             trades: List of trade events
-            
+            symbol: Trading pair for tier-aware threshold
+
         Returns:
             (large_buys, large_sells) count tuple
         """
         large_buys = 0
         large_sells = 0
-        
+        threshold = self.get_large_order_threshold(symbol) if symbol else self.large_order_threshold
+
         for trade in trades:
             side = int(trade.get("side", 0))
-            vol = float(trade.get("volume_usd", trade.get("vol", 0)))
-            
-            if vol >= self.large_order_threshold:
+            vol = float(trade.get("vol", 0))
+
+            if vol >= threshold:
                 if side == 2:  # Large buy
                     large_buys += 1
                 elif side == 1:  # Large sell
                     large_sells += 1
-        
+
         return (large_buys, large_sells)
     
     def determine_signal_type(self, buy_ratio: float, large_buys: int, large_sells: int) -> Optional[str]:

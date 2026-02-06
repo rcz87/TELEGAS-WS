@@ -1,9 +1,9 @@
 # TELEGLAS Pro - Main Entry Point
-# Real-Time Market Intelligence System - PRODUCTION READY v3.0
+# Real-Time Market Intelligence System - PRODUCTION READY v4.0
 # ALL-COIN monitoring with dynamic tiered thresholds
 
 """
-TELEGLAS Pro - Complete Integration v3.0
+TELEGLAS Pro - Complete Integration v4.0
 
 Connects all layers into working system:
 WebSocket → Processors → Analyzers → Signals → Alerts → Telegram
@@ -15,7 +15,7 @@ Provides 30-90 second information edge through:
 - ALL-coin monitoring via liquidationOrders channel
 - Dynamic trade subscriptions for active coins
 
-v3.0 Changes:
+v4.0 Changes:
 - ALL coins from CoinGlass are now monitored (not just 3)
 - Dynamic tiered thresholds: BTC $2M, mid-caps $200K, small coins $50K
 - Auto-discovery of new coins from liquidation data
@@ -765,9 +765,9 @@ class TeleglasPro:
             try:
                 for symbol in self.buffer_manager.get_tracked_symbols():
                     liqs = self.buffer_manager.get_liquidations(symbol, time_window=3600)
-                    liq_vol = sum(float(l.get("volume_usd", l.get("vol", 0))) for l in liqs)
+                    liq_vol = sum(float(l.get("vol", 0)) for l in liqs)
                     trades = self.buffer_manager.get_trades(symbol, time_window=3600)
-                    trade_vol = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in trades)
+                    trade_vol = sum(float(t.get("vol", 0)) for t in trades)
                     if liq_vol > 0 or trade_vol > 0:
                         await self.db.save_baseline(symbol, liq_vol, trade_vol)
                 await self.db.cleanup_old_baselines(max_age_hours=72)
@@ -789,7 +789,7 @@ class TeleglasPro:
     async def run(self):
         """Run the complete system"""
         self.logger.info("=" * 60)
-        self.logger.info("🚀 TELEGLAS Pro v3.0 - Starting (ALL-COIN Monitoring)")
+        self.logger.info("🚀 TELEGLAS Pro v4.0 - Starting (ALL-COIN Monitoring)")
         self.logger.info("=" * 60)
 
         try:
@@ -829,7 +829,7 @@ class TeleglasPro:
             ]
             
             self.logger.info("=" * 60)
-            self.logger.info("✅ TELEGLAS Pro v3.0 - Running (ALL-COIN Monitoring)")
+            self.logger.info("✅ TELEGLAS Pro v4.0 - Running (ALL-COIN Monitoring)")
             self.logger.info("=" * 60)
             self.logger.info(f"Trade subscriptions: {', '.join(self.trade_symbols)}")
             self.logger.info(f"Liquidation monitoring: ALL coins (mode={self.monitoring_mode})")

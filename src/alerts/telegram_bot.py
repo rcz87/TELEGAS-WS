@@ -50,7 +50,10 @@ class TelegramBot:
         
         self.api_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self.logger = setup_logger("TelegramBot", "INFO")
-        
+
+        # Reusable aiohttp session (created lazily)
+        self._session: Optional[aiohttp.ClientSession] = None
+
         # Statistics
         self._messages_sent = 0
         self._messages_failed = 0
@@ -78,19 +81,24 @@ class TelegramBot:
                 "parse_mode": parse_mode
             }
             
-            # Send via HTTP POST
-            async with aiohttp.ClientSession() as session:
-                async with session.post(self.api_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                    if response.status == 200:
-                        self._messages_sent += 1
-                        self._last_send_time = datetime.now()
-                        self.logger.info(f"✅ Message sent successfully")
-                        return True
-                    else:
-                        error_text = await response.text()
-                        self.logger.error(f"❌ Send failed: {response.status} - {error_text}")
-                        self._messages_failed += 1
-                        return False
+            # Lazily create reusable session
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+
+            # Send via HTTP POST (reusing connection pool)
+            async with self._session.post(self.api_url, json=payload) as response:
+                if response.status == 200:
+                    self._messages_sent += 1
+                    self._last_send_time = datetime.now()
+                    self.logger.info(f"✅ Message sent successfully")
+                    return True
+                else:
+                    error_text = await response.text()
+                    self.logger.error(f"❌ Send failed: {response.status} - {error_text}")
+                    self._messages_failed += 1
+                    return False
                         
         except asyncio.TimeoutError:
             self.logger.error("❌ Send timeout")
