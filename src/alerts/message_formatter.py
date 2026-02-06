@@ -152,11 +152,11 @@ class MessageFormatter:
 
 🐋 *Whale Absorption*: ${absorption_vol/1_000:.0f}K ({absorption_pct:.0f}% of cascade)
 
-💡 *TRADING SETUP*
+💡 *TRADING SETUP* {'📈 LONG' if is_short_hunt else '📉 SHORT'}
 Entry: ${entry_low:,.0f} - ${entry_high:,.0f}
 Stop Loss: ${sl:,.0f} ({risk_pct:.1f}% risk)
-Target 1: ${target1:,.0f} (+{t1_pct:.1f}%) R:R 1:2
-Target 2: ${target2:,.0f} (+{t2_pct:.1f}%) R:R 1:3{track_line}
+Target 1: ${target1:,.0f} ({'+' if is_short_hunt else '-'}{t1_pct:.1f}%) R:R 1:2
+Target 2: ${target2:,.0f} ({'+' if is_short_hunt else '-'}{t2_pct:.1f}%) R:R 1:3{track_line}
 
 🎯 Confidence: {signal.confidence:.0f}%
 ⏰ {datetime.now().strftime('%H:%M:%S')} UTC"""
