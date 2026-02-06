@@ -42,6 +42,7 @@ from src.analyzers.event_pattern_detector import EventPatternDetector
 from src.signals.signal_generator import SignalGenerator
 from src.signals.confidence_scorer import ConfidenceScorer
 from src.signals.signal_validator import SignalValidator
+from src.signals.signal_tracker import SignalTracker
 from src.alerts.message_formatter import MessageFormatter
 from src.alerts.telegram_bot import TelegramBot
 from src.alerts.alert_queue import AlertQueue
@@ -114,6 +115,13 @@ class TeleglasPro:
         # Alerts
         self.message_formatter = MessageFormatter()
         self.alert_queue = AlertQueue(max_size=1000)
+
+        # Signal outcome tracker
+        self.signal_tracker = SignalTracker(
+            buffer_manager=self.buffer_manager,
+            confidence_scorer=self.confidence_scorer,
+            check_interval_seconds=config.get('analysis', {}).get('signal_check_interval', 900)
+        )
         
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
@@ -369,7 +377,15 @@ class TeleglasPro:
                     return
                 
                 self.stats['signals_generated'] += 1
-                
+
+                # Inject track record into metadata for message_formatter
+                track_record = self.signal_tracker.get_track_record(trading_signal.signal_type)
+                trading_signal.metadata.setdefault('stop_hunt', {})['track_record'] = track_record
+
+                # Inject baseline context into metadata
+                baseline = self.buffer_manager.get_baseline(symbol)
+                trading_signal.metadata['baseline'] = baseline
+
                 # Send to dashboard
                 dashboard_api.add_signal({
                     'symbol': symbol,
@@ -377,15 +393,26 @@ class TeleglasPro:
                     'confidence': int(trading_signal.confidence),
                     'description': f"{trading_signal.signal_type} detected"
                 })
-                
+
                 # Format message
                 formatted_message = self.message_formatter.format_signal(trading_signal)
-                
+
                 # Queue alert
                 await self.alert_queue.add(
                     formatted_message,
                     priority=trading_signal.priority
                 )
+
+                # Track signal for outcome measurement
+                price_zone = trading_signal.metadata.get('stop_hunt', {}).get('price_zone', (0, 0))
+                if price_zone[1] > 0:
+                    zone_spread = abs(price_zone[1] - price_zone[0])
+                    is_long = trading_signal.direction == "LONG"
+                    entry = price_zone[1] if is_long else price_zone[0]
+                    sl = price_zone[0] - (zone_spread * 0.3) if is_long else price_zone[1] + (zone_spread * 0.3)
+                    risk = abs(entry - sl)
+                    tp = entry + (risk * 2) if is_long else entry - (risk * 2)
+                    self.signal_tracker.track_signal(trading_signal, entry, sl, tp)
                 
                 self.logger.info(f"🎯 Signal queued: {symbol} {trading_signal.signal_type}")
                 
@@ -441,13 +468,26 @@ class TeleglasPro:
                 self.logger.info(f"   Alerts: {self.stats['alerts_sent']} sent")
                 self.logger.info(f"   Errors: {self.stats['errors']}")
     
+    async def signal_tracker_task(self):
+        """Background task: check signal outcomes every 60 seconds"""
+        self.logger.info("📊 Signal tracker started")
+        while not shutdown_event.is_set():
+            await asyncio.sleep(60)
+            try:
+                await self.signal_tracker.check_outcomes()
+            except Exception as e:
+                self.logger.error(f"Signal tracker error: {e}")
+
     async def cleanup_task(self):
         """Background task: cleanup old data every hour"""
         while not shutdown_event.is_set():
             await asyncio.sleep(3600)  # 1 hour
-            
+
             self.logger.info("🧹 Running cleanup...")
             self.buffer_manager.cleanup_old_data(max_age_seconds=7200)  # 2 hours
+
+            # Update hourly baseline for context comparison
+            self.buffer_manager.update_hourly_baseline()
     
     async def run(self):
         """Run the complete system"""
@@ -484,7 +524,8 @@ class TeleglasPro:
             tasks = [
                 asyncio.create_task(self.alert_processor()),
                 asyncio.create_task(self.stats_reporter()),
-                asyncio.create_task(self.cleanup_task())
+                asyncio.create_task(self.cleanup_task()),
+                asyncio.create_task(self.signal_tracker_task())
             ]
             
             self.logger.info("=" * 60)
