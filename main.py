@@ -108,7 +108,8 @@ class TeleglasPro:
         )
         self.event_detector = EventPatternDetector(
             self.buffer_manager,
-            monitoring_config=monitoring_config
+            monitoring_config=monitoring_config,
+            large_order_threshold=thresholds.get('large_order_threshold', 10_000)
         )
         
         # Signals
