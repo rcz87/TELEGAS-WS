@@ -50,6 +50,7 @@ from src.signals.signal_tracker import SignalTracker
 from src.alerts.message_formatter import MessageFormatter
 from src.alerts.telegram_bot import TelegramBot
 from src.alerts.alert_queue import AlertQueue
+from src.storage.database import Database
 from src.utils.logger import setup_logger
 
 # Global flag for shutdown
@@ -127,11 +128,17 @@ class TeleglasPro:
         self.message_formatter = MessageFormatter()
         self.alert_queue = AlertQueue(max_size=1000)
 
-        # Signal outcome tracker
+        # Database for persistent storage
+        storage_config = config.get('storage', {})
+        db_path = storage_config.get('database_url', 'data/teleglas.db')
+        self.db = Database(db_path=db_path)
+
+        # Signal outcome tracker (with DB callback for persistence)
         self.signal_tracker = SignalTracker(
             buffer_manager=self.buffer_manager,
             confidence_scorer=self.confidence_scorer,
-            check_interval_seconds=config.get('analysis', {}).get('signal_check_interval', 900)
+            check_interval_seconds=config.get('analysis', {}).get('signal_check_interval', 900),
+            on_outcome_callback=self._on_signal_outcome
         )
         
         # Telegram (optional - only if configured)
@@ -372,6 +379,110 @@ class TeleglasPro:
             return symbol in active_coins
         return True  # New/undiscovered coins default to active
 
+    async def _on_signal_outcome(self, tracked, pnl_pct: float):
+        """Callback: save signal outcome to database."""
+        try:
+            if tracked._db_id:
+                await self.db.update_signal_outcome(
+                    signal_id=tracked._db_id,
+                    outcome=tracked.outcome,
+                    exit_price=tracked.exit_price or 0,
+                    pnl_pct=pnl_pct
+                )
+        except Exception as e:
+            self.logger.debug(f"DB outcome save error: {e}")
+
+    async def _init_database(self):
+        """Connect to database and restore saved state."""
+        try:
+            await self.db.connect()
+
+            # Restore confidence scorer state
+            saved_confidence = await self.db.load_confidence_state()
+            if saved_confidence:
+                for signal_type, state in saved_confidence.items():
+                    self.confidence_scorer.win_rates[signal_type] = state["win_rate"]
+                    self.confidence_scorer.signal_history[signal_type] = state["history"]
+                self.logger.info(
+                    f"Restored confidence state: "
+                    f"{len(saved_confidence)} signal types loaded"
+                )
+
+            # Restore dashboard coin toggle state
+            saved_coins = await self.db.load_dashboard_coins()
+            if saved_coins:
+                # Merge: keep config coins, overlay saved active/inactive state
+                saved_map = {c["symbol"]: c["active"] for c in saved_coins}
+                with dashboard_api.state_lock:
+                    for coin in dashboard_api.system_state["coins"]:
+                        if coin["symbol"] in saved_map:
+                            coin["active"] = saved_map[coin["symbol"]]
+                    # Add coins that were saved but not in config
+                    existing = {c["symbol"] for c in dashboard_api.system_state["coins"]}
+                    for sc in saved_coins:
+                        if sc["symbol"] not in existing:
+                            dashboard_api.system_state["coins"].append({
+                                "symbol": sc["symbol"],
+                                "active": sc["active"],
+                                "buy_ratio": 0, "sell_ratio": 0,
+                                "large_buys": 0, "large_sells": 0,
+                                "last_update": "restored"
+                            })
+                self.logger.info(f"Restored dashboard state: {len(saved_coins)} coins")
+
+            # Restore baselines into buffer_manager
+            for symbol in self.trade_symbols:
+                baselines = await self.db.load_baselines(symbol, hours=24)
+                if baselines:
+                    from collections import deque
+                    if symbol not in self.buffer_manager._hourly_liq_volume:
+                        self.buffer_manager._hourly_liq_volume[symbol] = deque(maxlen=24)
+                    if symbol not in self.buffer_manager._hourly_trade_volume:
+                        self.buffer_manager._hourly_trade_volume[symbol] = deque(maxlen=24)
+                    for b in baselines:
+                        self.buffer_manager._hourly_liq_volume[symbol].append(
+                            (b["recorded_at"], b["liq_volume"])
+                        )
+                        self.buffer_manager._hourly_trade_volume[symbol].append(
+                            (b["recorded_at"], b["trade_volume"])
+                        )
+            baseline_count = sum(
+                len(v) for v in self.buffer_manager._hourly_liq_volume.values()
+            )
+            if baseline_count:
+                self.logger.info(f"Restored baselines: {baseline_count} data points")
+
+            # Share DB reference with dashboard for export endpoints
+            dashboard_api._db = self.db
+
+        except Exception as e:
+            self.logger.error(f"Database init error: {e} (continuing without persistence)")
+
+    async def _save_state(self):
+        """Save all state to database before shutdown."""
+        try:
+            # Save confidence scorer state
+            for signal_type, history in self.confidence_scorer.signal_history.items():
+                if history:
+                    await self.db.save_confidence_state(
+                        signal_type,
+                        self.confidence_scorer.win_rates.get(signal_type, 0.5),
+                        history
+                    )
+
+            # Save dashboard coin state
+            with dashboard_api.state_lock:
+                coins = [
+                    {"symbol": c["symbol"], "active": c.get("active", True)}
+                    for c in dashboard_api.system_state["coins"]
+                ]
+            await self.db.save_dashboard_coins(coins)
+
+            self.logger.info("State saved to database")
+
+        except Exception as e:
+            self.logger.error(f"State save error: {e}")
+
     async def analyze_and_alert(self, symbol: str):
         """
         Run analysis and send alerts for symbol.
@@ -466,6 +577,23 @@ class TeleglasPro:
                     risk = abs(entry - sl)
                     tp = entry + (risk * 2) if is_long else entry - (risk * 2)
                     self.signal_tracker.track_signal(trading_signal, entry, sl, tp)
+
+                    # Save signal to database
+                    try:
+                        db_id = await self.db.save_signal(
+                            symbol=symbol,
+                            signal_type=trading_signal.signal_type,
+                            direction=trading_signal.direction,
+                            confidence=trading_signal.confidence,
+                            entry_price=entry,
+                            stop_loss=sl,
+                            target_price=tp
+                        )
+                        # Store DB ID on tracked signal for later outcome update
+                        if self.signal_tracker._pending:
+                            self.signal_tracker._pending[-1]._db_id = db_id
+                    except Exception:
+                        pass  # DB save is non-critical
 
         except Exception as e:
             self.logger.error(f"Analysis error for {symbol}: {e}")
@@ -612,7 +740,7 @@ class TeleglasPro:
                 self.logger.error(f"Dynamic subscription error: {e}")
 
     async def cleanup_task(self):
-        """Background task: cleanup old data every hour"""
+        """Background task: cleanup old data every hour, save baselines to DB"""
         while not shutdown_event.is_set():
             await asyncio.sleep(3600)  # 1 hour
 
@@ -621,18 +749,46 @@ class TeleglasPro:
 
             # Update hourly baseline for context comparison
             self.buffer_manager.update_hourly_baseline()
+
+            # Save baselines to database
+            try:
+                for symbol in self.buffer_manager.get_tracked_symbols():
+                    liqs = self.buffer_manager.get_liquidations(symbol, time_window=3600)
+                    liq_vol = sum(float(l.get("volume_usd", l.get("vol", 0))) for l in liqs)
+                    trades = self.buffer_manager.get_trades(symbol, time_window=3600)
+                    trade_vol = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in trades)
+                    if liq_vol > 0 or trade_vol > 0:
+                        await self.db.save_baseline(symbol, liq_vol, trade_vol)
+                await self.db.cleanup_old_baselines(max_age_hours=72)
+            except Exception as e:
+                self.logger.error(f"Baseline save error: {e}")
+
+            # Periodically save confidence state
+            try:
+                for signal_type, history in self.confidence_scorer.signal_history.items():
+                    if history:
+                        await self.db.save_confidence_state(
+                            signal_type,
+                            self.confidence_scorer.win_rates.get(signal_type, 0.5),
+                            history
+                        )
+            except Exception as e:
+                self.logger.error(f"Confidence save error: {e}")
     
     async def run(self):
         """Run the complete system"""
         self.logger.info("=" * 60)
         self.logger.info("🚀 TELEGLAS Pro v3.0 - Starting (ALL-COIN Monitoring)")
         self.logger.info("=" * 60)
-        
+
         try:
+            # Initialize database and restore saved state
+            await self._init_database()
+
             # Setup callbacks
             self.websocket_client.on_connect(self.on_connect)
             self.websocket_client.on_message(self.on_message)
-            
+
             # Connect WebSocket
             self.logger.info("Connecting to CoinGlass WebSocket...")
             connected = await self.websocket_client.connect()
@@ -675,13 +831,17 @@ class TeleglasPro:
             # Cleanup
             self.logger.info("Shutting down...")
             await self.websocket_client.disconnect()
-            
+
             # Cancel background tasks
             for task in tasks:
                 task.cancel()
-            
+
             await asyncio.gather(*tasks, return_exceptions=True)
-            
+
+            # Save state to database before exit
+            await self._save_state()
+            await self.db.close()
+
             self.logger.info("✅ Shutdown complete")
             
         except Exception as e:
