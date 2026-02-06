@@ -48,18 +48,36 @@ class EventPatternDetector:
     - Multiple pattern types
     """
     
-    def __init__(self, buffer_manager):
+    def __init__(self, buffer_manager, monitoring_config: dict = None):
         """
         Initialize event pattern detector
-        
+
         Args:
             buffer_manager: BufferManager instance
+            monitoring_config: Dynamic monitoring config with per-tier thresholds
         """
         self.buffer_manager = buffer_manager
         self.logger = setup_logger("EventPatternDetector", "INFO")
         self._detections = 0
-        
-    async def detect_liquidation_cascade(self, symbol: str, threshold: float = 2000000) -> Optional[EventSignal]:
+
+        # Tiered thresholds for dynamic all-coin monitoring
+        monitoring = monitoring_config or {}
+        self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
+        self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
+        self._tier1_cascade = monitoring.get('tier1_cascade', 2_000_000)
+        self._tier2_cascade = monitoring.get('tier2_cascade', 200_000)
+        self._tier3_cascade = monitoring.get('tier3_cascade', 50_000)
+
+    def get_threshold_for_symbol(self, symbol: str) -> float:
+        """Get dynamic cascade threshold based on coin tier."""
+        if symbol in self._tier1_symbols:
+            return self._tier1_cascade
+        elif symbol in self._tier2_symbols:
+            return self._tier2_cascade
+        else:
+            return self._tier3_cascade
+
+    async def detect_liquidation_cascade(self, symbol: str, threshold: float = None) -> Optional[EventSignal]:
         """
         Detect liquidation cascade event
         
@@ -75,22 +93,27 @@ class EventPatternDetector:
             EventSignal if detected, None otherwise
         """
         try:
+            # Use dynamic per-coin threshold if not explicitly passed
+            if threshold is None:
+                threshold = self.get_threshold_for_symbol(symbol)
+
             liquidations = self.buffer_manager.get_liquidations(symbol, time_window=30)
-            
+
             if not liquidations:
                 return None
-            
+
             total_volume = sum(float(liq.get("volume_usd", liq.get("vol", 0))) for liq in liquidations)
-            
+
             if total_volume < threshold:
                 return None
-            
-            # Calculate confidence based on volume
-            if total_volume > 10_000_000:
+
+            # Calculate confidence based on volume ratio to threshold
+            volume_ratio = total_volume / max(threshold, 1)
+            if volume_ratio > 5.0:
                 confidence = 95.0
-            elif total_volume > 5_000_000:
+            elif volume_ratio > 2.5:
                 confidence = 85.0
-            elif total_volume > 3_000_000:
+            elif volume_ratio > 1.5:
                 confidence = 75.0
             else:
                 confidence = 65.0

@@ -149,20 +149,21 @@ class DataValidator:
     def validate_liquidation(self, data: dict) -> ValidationResult:
         """
         Validate liquidation event data
-        
+
         Checks:
         - Required fields present
         - Correct data types
         - Value ranges
         - Business logic
-        
+
         Args:
-            data: Liquidation data dictionary
-            
+            data: Liquidation data dictionary (flat or nested with "data" key)
+
         Returns:
             ValidationResult
         """
-        liquidation_data = data.get("data", {})
+        # Support both flat format {"symbol":...} and nested {"data":{"symbol":...}}
+        liquidation_data = data["data"] if "data" in data and isinstance(data["data"], dict) else data
         result = self.validate(liquidation_data, self.liquidation_schema)
         
         # Additional business logic validation
@@ -189,20 +190,21 @@ class DataValidator:
     def validate_trade(self, data: dict) -> ValidationResult:
         """
         Validate trade event data
-        
+
         Checks:
         - Required fields present
         - Correct data types
         - Value ranges
         - Business logic
-        
+
         Args:
-            data: Trade data dictionary
-            
+            data: Trade data dictionary (flat or nested with "data" key)
+
         Returns:
             ValidationResult
         """
-        trade_data = data.get("data", {})
+        # Support both flat format {"symbol":...} and nested {"data":{"symbol":...}}
+        trade_data = data["data"] if "data" in data and isinstance(data["data"], dict) else data
         result = self.validate(trade_data, self.trade_schema)
         
         # Additional business logic validation

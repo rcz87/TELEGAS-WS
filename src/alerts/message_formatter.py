@@ -105,14 +105,44 @@ class MessageFormatter:
             # Direction
             direction = "SHORT_HUNT (longs stopped)" if "SHORT" in str(metadata.get('direction', '')) else "LONG_HUNT (shorts stopped)"
             
-            # Price zone
+            # Price zone - calculate levels from actual liquidation data
             price_zone = metadata.get('price_zone', (0, 0))
-            entry_low = price_zone[1]
-            entry_high = price_zone[1] * 1.002
-            sl = price_zone[0] * 0.995
-            target1 = price_zone[1] * 1.01
-            target2 = price_zone[1] * 1.018
-            
+            zone_spread = abs(price_zone[1] - price_zone[0]) if price_zone[1] > 0 else 0
+            is_short_hunt = "SHORT" in str(metadata.get('direction', ''))
+
+            if is_short_hunt:
+                # Longs got stopped, price akan naik → LONG entry
+                entry_low = price_zone[1]
+                entry_high = price_zone[1] + (zone_spread * 0.1)
+                sl = price_zone[0] - (zone_spread * 0.3)
+                risk = max(entry_low - sl, 1)
+                target1 = entry_low + (risk * 2)
+                target2 = entry_low + (risk * 3)
+            else:
+                # Shorts got stopped, price akan turun → SHORT entry
+                entry_high = price_zone[0]
+                entry_low = price_zone[0] - (zone_spread * 0.1)
+                sl = price_zone[1] + (zone_spread * 0.3)
+                risk = max(sl - entry_high, 1)
+                target1 = entry_high - (risk * 2)
+                target2 = entry_high - (risk * 3)
+
+            entry_mid = (entry_low + entry_high) / 2 if entry_low > 0 else 1
+            t1_pct = abs(target1 - entry_mid) / entry_mid * 100
+            t2_pct = abs(target2 - entry_mid) / entry_mid * 100
+            risk_pct = risk / entry_mid * 100
+
+            # Absorption context
+            absorption_vol = metadata.get('absorption_volume', 0)
+            total_vol = metadata.get('total_volume', 1)
+            absorption_pct = (absorption_vol / total_vol * 100) if total_vol > 0 else 0
+
+            # Track record from metadata (populated by signal_tracker)
+            track_line = ""
+            track = metadata.get('track_record', {})
+            if track.get('total', 0) > 0:
+                track_line = f"\n📈 *Track Record*: {track['wins']}W/{track['losses']}L ({track['win_rate']:.0f}%)"
+
             message = f"""{priority_emoji} *STOP HUNT DETECTED* - {signal.symbol}
 
 📊 *Liquidations*: ${metadata.get('total_volume', 0)/1_000_000:.1f}M cleared
@@ -120,14 +150,13 @@ class MessageFormatter:
 • Count: {metadata.get('liquidation_count', 0)} liquidations
 • Zone: ${price_zone[0]:,.0f} - ${price_zone[1]:,.0f}
 
-🐋 *Whale Absorption*: ${metadata.get('absorption_volume', 0)/1_000:.0f}K
-✅ Strong buying after cascade
+🐋 *Whale Absorption*: ${absorption_vol/1_000:.0f}K ({absorption_pct:.0f}% of cascade)
 
 💡 *TRADING SETUP*
 Entry: ${entry_low:,.0f} - ${entry_high:,.0f}
-Stop Loss: ${sl:,.0f} (below hunt zone)
-Target 1: ${target1:,.0f} (+1.0%)
-Target 2: ${target2:,.0f} (+1.8%)
+Stop Loss: ${sl:,.0f} ({risk_pct:.1f}% risk)
+Target 1: ${target1:,.0f} (+{t1_pct:.1f}%) R:R 1:2
+Target 2: ${target2:,.0f} (+{t2_pct:.1f}%) R:R 1:3{track_line}
 
 🎯 Confidence: {signal.confidence:.0f}%
 ⏰ {datetime.now().strftime('%H:%M:%S')} UTC"""

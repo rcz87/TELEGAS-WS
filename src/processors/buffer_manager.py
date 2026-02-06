@@ -54,7 +54,13 @@ class BufferManager:
         # CRITICAL FIX Bug #10: Track dropped messages
         self._dropped_liquidations = 0
         self._dropped_trades = 0
-        
+
+        # Rolling baseline: track hourly volume per symbol for context
+        # Key: symbol, Value: list of (timestamp, volume) tuples per hour
+        self._hourly_liq_volume: Dict[str, deque] = {}
+        self._hourly_trade_volume: Dict[str, deque] = {}
+        self._last_hourly_update: float = 0
+
         # Logger
         self.logger = setup_logger("BufferManager", "INFO")
         
@@ -343,6 +349,78 @@ class BufferManager:
         """Get list of tracked symbols"""
         return sorted(list(self._symbols_tracked))
     
+    def update_hourly_baseline(self):
+        """
+        Snapshot current hour's volume per symbol for baseline comparison.
+        Called periodically (e.g. every hour) from main.py cleanup_task.
+        """
+        now = time.time()
+        for symbol in self._symbols_tracked:
+            # Liquidation volume this hour
+            liqs = self.get_liquidations(symbol, time_window=3600)
+            liq_vol = sum(float(l.get("volume_usd", l.get("vol", 0))) for l in liqs)
+            if symbol not in self._hourly_liq_volume:
+                self._hourly_liq_volume[symbol] = deque(maxlen=24)  # 24 hours
+            self._hourly_liq_volume[symbol].append((now, liq_vol))
+
+            # Trade volume this hour
+            trades = self.get_trades(symbol, time_window=3600)
+            trade_vol = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in trades)
+            if symbol not in self._hourly_trade_volume:
+                self._hourly_trade_volume[symbol] = deque(maxlen=24)
+            self._hourly_trade_volume[symbol].append((now, trade_vol))
+
+        self._last_hourly_update = now
+
+    def get_baseline(self, symbol: str) -> dict:
+        """
+        Get rolling baseline for a symbol.
+
+        Returns avg hourly liquidation/trade volume and how current
+        period compares (multiplier).
+
+        Returns:
+            dict with avg_liq_volume, avg_trade_volume, current vs average multiplier
+        """
+        result = {
+            'avg_hourly_liq_volume': 0,
+            'avg_hourly_trade_volume': 0,
+            'current_liq_volume': 0,
+            'current_trade_volume': 0,
+            'liq_multiplier': 1.0,
+            'trade_multiplier': 1.0,
+            'hours_of_data': 0
+        }
+
+        # Average from hourly snapshots
+        hourly_liqs = self._hourly_liq_volume.get(symbol, deque())
+        if hourly_liqs:
+            avg_liq = sum(v for _, v in hourly_liqs) / len(hourly_liqs)
+            result['avg_hourly_liq_volume'] = avg_liq
+            result['hours_of_data'] = len(hourly_liqs)
+
+        hourly_trades = self._hourly_trade_volume.get(symbol, deque())
+        if hourly_trades:
+            avg_trade = sum(v for _, v in hourly_trades) / len(hourly_trades)
+            result['avg_hourly_trade_volume'] = avg_trade
+
+        # Current 30-min volume (to compare with hourly avg)
+        current_liqs = self.get_liquidations(symbol, time_window=1800)
+        current_liq_vol = sum(float(l.get("volume_usd", l.get("vol", 0))) for l in current_liqs)
+        result['current_liq_volume'] = current_liq_vol
+
+        current_trades = self.get_trades(symbol, time_window=1800)
+        current_trade_vol = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in current_trades)
+        result['current_trade_volume'] = current_trade_vol
+
+        # Multiplier: current 30min extrapolated to 1hr vs avg
+        if result['avg_hourly_liq_volume'] > 0:
+            result['liq_multiplier'] = (current_liq_vol * 2) / result['avg_hourly_liq_volume']
+        if result['avg_hourly_trade_volume'] > 0:
+            result['trade_multiplier'] = (current_trade_vol * 2) / result['avg_hourly_trade_volume']
+
+        return result
+
     def get_stats(self) -> dict:
         """Get buffer manager statistics"""
         total_liq_in_buffers = sum(

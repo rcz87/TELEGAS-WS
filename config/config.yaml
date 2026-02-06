@@ -76,6 +76,46 @@ dashboard:
     - "http://localhost:8080"
     - "http://31.97.107.243:8080"
 
+# Dynamic Coin Monitoring
+# mode: "all" = process ALL coins from CoinGlass (recommended)
+#        "configured" = only process primary + secondary coins
+monitoring:
+  mode: "all"
+
+  # Coin Tier Classification for dynamic thresholds
+  # Tier 1: Major coins - highest thresholds
+  # Tier 2: Mid-cap coins - medium thresholds
+  # Tier 3: Everything else (small coins) - lowest thresholds
+  tier1_symbols:
+    - BTCUSDT
+    - ETHUSDT
+  tier2_symbols:
+    - BNBUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+    - DOGEUSDT
+    - AVAXUSDT
+    - MATICUSDT
+    - DOTUSDT
+    - LINKUSDT
+    - LTCUSDT
+    - UNIUSDT
+    - AAVEUSDT
+
+  # Liquidation cascade thresholds per tier
+  tier1_cascade: 2000000         # $2M for BTC, ETH
+  tier2_cascade: 200000          # $200K for mid-caps
+  tier3_cascade: 50000           # $50K for small coins
+
+  # Absorption thresholds per tier
+  tier1_absorption: 100000       # $100K
+  tier2_absorption: 20000        # $20K
+  tier3_absorption: 5000         # $5K
+
+  # Max concurrent analysis tasks (resource management)
+  max_concurrent_analysis: 30
+
 # Analysis Windows
 analysis:
   stop_hunt_window: 30           # Seconds
