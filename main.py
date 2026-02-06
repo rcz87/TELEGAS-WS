@@ -864,7 +864,7 @@ def validate_config(config: dict) -> tuple[bool, list[str]]:
         Tuple of (is_valid, list_of_errors)
     """
     errors = []
-    required_sections = ['pairs', 'thresholds', 'signals', 'alerts', 'buffers', 'websocket']
+    required_sections = ['pairs', 'thresholds', 'signals', 'alerts', 'buffers', 'websocket', 'monitoring']
     
     for section in required_sections:
         if section not in config:
@@ -894,11 +894,12 @@ def load_config() -> dict:
     
     CRITICAL FIX Bug #11: Added validation
     """
-    # Load secrets from .env
-    load_dotenv("config/secrets.env")
-    
+    # Use absolute paths relative to project root (works regardless of CWD)
+    project_root = Path(__file__).parent
+    load_dotenv(project_root / "config" / "secrets.env")
+
     # Load main config
-    config_path = Path("config/config.yaml")
+    config_path = project_root / "config" / "config.yaml"
     if config_path.exists():
         with open(config_path) as f:
             config = yaml.safe_load(f)
@@ -932,6 +933,18 @@ def load_config() -> dict:
                 'heartbeat_interval': 20,
                 'reconnect_delay': 1,
                 'max_reconnect_delay': 60
+            },
+            'monitoring': {
+                'mode': 'all',
+                'tier1_symbols': ['BTCUSDT', 'ETHUSDT'],
+                'tier2_symbols': ['BNBUSDT', 'SOLUSDT', 'XRPUSDT'],
+                'tier1_cascade': 2_000_000,
+                'tier2_cascade': 200_000,
+                'tier3_cascade': 50_000,
+                'tier1_absorption': 100_000,
+                'tier2_absorption': 20_000,
+                'tier3_absorption': 5_000,
+                'max_concurrent_analysis': 30
             },
             'analysis': {
                 'stop_hunt_window': 30,
