@@ -357,10 +357,28 @@ class TeleglasPro:
             self.logger.error(f"Error handling trade: {e}")
             self.stats['errors'] += 1
     
+    def _is_coin_active(self, symbol: str) -> bool:
+        """
+        Check if coin is active (not disabled) on the dashboard.
+
+        Coins not in the dashboard list are considered active by default
+        (newly discovered coins). Only explicitly toggled-off coins are inactive.
+        """
+        active_coins = dashboard_api.get_monitored_coins()
+        # If coin is in dashboard list, check its active status
+        # If coin is NOT in dashboard list (new discovery), treat as active
+        all_dashboard_symbols = [c["symbol"] for c in dashboard_api.system_state.get("coins", [])]
+        if symbol in all_dashboard_symbols:
+            return symbol in active_coins
+        return True  # New/undiscovered coins default to active
+
     async def analyze_and_alert(self, symbol: str):
         """
-        Run analysis and send alerts for symbol
-        FIX: Added debouncing to prevent task explosion
+        Run analysis and send alerts for symbol.
+
+        Analysis runs for ALL coins (data is always collected).
+        Telegram alerts only sent for coins that are ACTIVE on dashboard.
+        Dashboard signals are always shown regardless.
         """
         try:
             # Debounce: Don't analyze same symbol within 5 seconds
@@ -368,19 +386,19 @@ class TeleglasPro:
             if symbol in self.last_analysis:
                 if now - self.last_analysis[symbol] < 5:
                     return
-            
+
             # Lock to prevent concurrent analysis of same symbol
             if symbol not in self.analysis_locks:
                 self.analysis_locks[symbol] = asyncio.Lock()
-            
+
             async with self.analysis_locks[symbol]:
                 self.last_analysis[symbol] = now
-                
-                # Run analyzers
+
+                # Run analyzers (always - data collection doesn't depend on toggle)
                 stop_hunt_signal = await self.stop_hunt_detector.analyze(symbol)
                 order_flow_signal = await self.order_flow_analyzer.analyze(symbol)
                 event_signals = await self.event_detector.analyze(symbol)
-                
+
                 # Generate unified signal
                 trading_signal = await self.signal_generator.generate(
                     symbol=symbol,
@@ -388,10 +406,10 @@ class TeleglasPro:
                     order_flow_signal=order_flow_signal,
                     event_signals=event_signals
                 )
-                
+
                 if not trading_signal:
                     return
-                
+
                 # Adjust confidence
                 adjusted_confidence = self.confidence_scorer.adjust_confidence(
                     trading_signal.confidence,
@@ -399,13 +417,13 @@ class TeleglasPro:
                     trading_signal.metadata
                 )
                 trading_signal.confidence = adjusted_confidence
-                
+
                 # Validate signal
                 is_valid, reason = self.signal_validator.validate(trading_signal)
                 if not is_valid:
                     self.logger.debug(f"Signal rejected: {reason}")
                     return
-                
+
                 self.stats['signals_generated'] += 1
 
                 # Inject track record into metadata for message_formatter
@@ -416,7 +434,7 @@ class TeleglasPro:
                 baseline = self.buffer_manager.get_baseline(symbol)
                 trading_signal.metadata['baseline'] = baseline
 
-                # Send to dashboard
+                # Always send to dashboard (user can see all signals in web UI)
                 dashboard_api.add_signal({
                     'symbol': symbol,
                     'type': trading_signal.signal_type,
@@ -424,16 +442,21 @@ class TeleglasPro:
                     'description': f"{trading_signal.signal_type} detected"
                 })
 
-                # Format message
-                formatted_message = self.message_formatter.format_signal(trading_signal)
+                # Check dashboard toggle: only send Telegram alert if coin is ACTIVE
+                if self._is_coin_active(symbol):
+                    # Format message
+                    formatted_message = self.message_formatter.format_signal(trading_signal)
 
-                # Queue alert
-                await self.alert_queue.add(
-                    formatted_message,
-                    priority=trading_signal.priority
-                )
+                    # Queue alert (sends to Telegram)
+                    await self.alert_queue.add(
+                        formatted_message,
+                        priority=trading_signal.priority
+                    )
+                    self.logger.info(f"🎯 Signal queued: {symbol} {trading_signal.signal_type}")
+                else:
+                    self.logger.info(f"🔇 Signal skipped (coin inactive): {symbol} {trading_signal.signal_type}")
 
-                # Track signal for outcome measurement
+                # Track signal for outcome measurement (always, regardless of toggle)
                 price_zone = trading_signal.metadata.get('stop_hunt', {}).get('price_zone', (0, 0))
                 if price_zone[1] > 0:
                     zone_spread = abs(price_zone[1] - price_zone[0])
@@ -443,9 +466,7 @@ class TeleglasPro:
                     risk = abs(entry - sl)
                     tp = entry + (risk * 2) if is_long else entry - (risk * 2)
                     self.signal_tracker.track_signal(trading_signal, entry, sl, tp)
-                
-                self.logger.info(f"🎯 Signal queued: {symbol} {trading_signal.signal_type}")
-                
+
         except Exception as e:
             self.logger.error(f"Analysis error for {symbol}: {e}")
     
@@ -511,16 +532,54 @@ class TeleglasPro:
 
     async def dynamic_subscription_task(self):
         """
-        Background task: subscribe to trade channels for newly discovered
-        coins that show significant liquidation activity.
+        Background task: manage trade channel subscriptions.
 
-        Runs every 5 minutes. If a discovered coin has liquidation
-        data in the buffer, subscribe to its trade channel for
-        richer analysis (absorption detection, order flow).
+        Two responsibilities:
+        1. Auto-subscribe to newly discovered coins with significant activity
+        2. Process dashboard add/remove coin requests (subscribe/unsubscribe)
+
+        Runs every 10 seconds for responsive dashboard actions,
+        with auto-discovery check every 5 minutes.
         """
+        last_discovery_check = 0
+
         while not shutdown_event.is_set():
-            await asyncio.sleep(300)  # Check every 5 minutes
+            await asyncio.sleep(10)  # Check dashboard requests every 10s
             try:
+                # --- Process dashboard subscription requests ---
+                pending = dashboard_api.get_pending_subscriptions()
+                for req in pending:
+                    symbol = req["symbol"]
+                    action = req["action"]
+
+                    if action == "subscribe" and symbol not in self._trade_subscribed:
+                        trade_channel = f"futures_trades@all_{symbol}@0"
+                        subscribe_msg = {
+                            "method": "subscribe",
+                            "channels": [trade_channel]
+                        }
+                        success = await self.websocket_client.send_message(subscribe_msg)
+                        if success:
+                            self._trade_subscribed.add(symbol)
+                            self.logger.info(f"📡 Dashboard subscription: {trade_channel}")
+
+                    elif action == "unsubscribe" and symbol in self._trade_subscribed:
+                        trade_channel = f"futures_trades@all_{symbol}@0"
+                        unsubscribe_msg = {
+                            "method": "unsubscribe",
+                            "channels": [trade_channel]
+                        }
+                        success = await self.websocket_client.send_message(unsubscribe_msg)
+                        if success:
+                            self._trade_subscribed.discard(symbol)
+                            self.logger.info(f"📡 Dashboard unsubscription: {trade_channel}")
+
+                # --- Auto-discovery check (every 5 minutes) ---
+                now = asyncio.get_event_loop().time()
+                if now - last_discovery_check < 300:
+                    continue
+                last_discovery_check = now
+
                 for symbol in list(self.discovered_symbols):
                     if symbol in self._trade_subscribed:
                         continue
