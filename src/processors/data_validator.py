@@ -43,21 +43,22 @@ class DataValidator:
         self._error_count = 0
         
         # Define schemas
+        # Note: CoinGlass sends price/vol as strings ("96000.50"), so accept str too
         self.liquidation_schema = {
             "symbol": {"type": str, "required": True},
             "exchange": {"type": str, "required": True},
-            "price": {"type": (int, float), "required": True, "min": 0},
+            "price": {"type": (int, float, str), "required": True, "min": 0},
             "side": {"type": int, "required": True, "values": [1, 2]},
-            "vol": {"type": (int, float), "required": True, "min": 0},
+            "vol": {"type": (int, float, str), "required": True, "min": 0},
             "time": {"type": int, "required": True, "min": 0}
         }
-        
+
         self.trade_schema = {
             "symbol": {"type": str, "required": True},
             "exchange": {"type": str, "required": True},
-            "price": {"type": (int, float), "required": True, "min": 0},
+            "price": {"type": (int, float, str), "required": True, "min": 0},
             "side": {"type": int, "required": True, "values": [1, 2]},
-            "vol": {"type": (int, float), "required": True, "min": 0},
+            "vol": {"type": (int, float, str), "required": True, "min": 0},
             "time": {"type": int, "required": True, "min": 0}
         }
     
