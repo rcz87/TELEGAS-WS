@@ -43,34 +43,68 @@ class StopHuntSignal:
 class StopHuntDetector:
     """
     Production-ready stop hunt detector
-    
+
     Detects liquidation cascades and whale absorption patterns
     to identify safe entry points after stop hunts.
-    
+
     Features:
-    - $2M+ cascade detection
+    - Dynamic tiered thresholds (BTC $2M, mid-caps $200K, small coins $50K)
     - Direction identification
     - Whale absorption detection
     - Confidence scoring
+    - All-coin monitoring support
     """
-    
-    def __init__(self, buffer_manager, threshold: float = 2000000, absorption_threshold: float = 100000, absorption_min_order_usd: float = 5000):
+
+    def __init__(self, buffer_manager, threshold: float = 2000000, absorption_threshold: float = 100000, absorption_min_order_usd: float = 5000, monitoring_config: dict = None):
         """
         Initialize stop hunt detector
 
         Args:
             buffer_manager: BufferManager instance
-            threshold: Minimum liquidation volume for cascade (default $2M)
-            absorption_threshold: Minimum absorption volume (default $100K)
+            threshold: Default liquidation volume for cascade (default $2M, used for tier1)
+            absorption_threshold: Default absorption volume (default $100K, used for tier1)
             absorption_min_order_usd: Minimum single order size for absorption (default $5K)
+            monitoring_config: Dynamic monitoring config with per-tier thresholds
         """
         self.buffer_manager = buffer_manager
         self.threshold = threshold
         self.absorption_threshold = absorption_threshold
         self.absorption_min_order_usd = absorption_min_order_usd
 
+        # Tiered thresholds for dynamic all-coin monitoring
+        monitoring = monitoring_config or {}
+        self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
+        self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
+        self._tier1_cascade = monitoring.get('tier1_cascade', threshold)
+        self._tier2_cascade = monitoring.get('tier2_cascade', 200_000)
+        self._tier3_cascade = monitoring.get('tier3_cascade', 50_000)
+        self._tier1_absorption = monitoring.get('tier1_absorption', absorption_threshold)
+        self._tier2_absorption = monitoring.get('tier2_absorption', 20_000)
+        self._tier3_absorption = monitoring.get('tier3_absorption', 5_000)
+
         self.logger = setup_logger("StopHuntDetector", "INFO")
         self._detections = 0
+
+    def get_threshold_for_symbol(self, symbol: str) -> tuple:
+        """
+        Get dynamic cascade and absorption thresholds based on coin tier.
+
+        Tier 1 (BTC, ETH): Highest thresholds - most liquid
+        Tier 2 (mid-caps): Medium thresholds
+        Tier 3 (small coins): Lowest thresholds - small cascade = significant
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            (cascade_threshold, absorption_threshold) tuple
+        """
+        if symbol in self._tier1_symbols:
+            return (self._tier1_cascade, self._tier1_absorption)
+        elif symbol in self._tier2_symbols:
+            return (self._tier2_cascade, self._tier2_absorption)
+        else:
+            return (self._tier3_cascade, self._tier3_absorption)
         
     async def analyze(self, symbol: str, cascade_window: int = 30, absorption_window: int = 30) -> Optional[StopHuntSignal]:
         """
@@ -99,32 +133,35 @@ class StopHuntDetector:
             if not liquidations:
                 return None
             
-            # Step 2: Calculate total volume
+            # Step 2: Calculate total volume with dynamic per-coin threshold
             total_volume = self.calculate_total_volume(liquidations)
-            
-            if total_volume < self.threshold:
+
+            cascade_threshold, absorption_threshold = self.get_threshold_for_symbol(symbol)
+
+            if total_volume < cascade_threshold:
                 self.logger.debug(
-                    f"{symbol}: Volume ${total_volume:,.0f} below threshold ${self.threshold:,.0f}"
+                    f"{symbol}: Volume ${total_volume:,.0f} below threshold ${cascade_threshold:,.0f}"
                 )
                 return None
-            
+
             # Step 3: Determine direction
             direction, directional_pct = self.determine_direction(liquidations)
-            
+
             # Step 4: Get price zone
             price_zone = self.get_price_zone(liquidations)
-            
+
             # Step 5: Check for absorption
             # No sleep needed - buffer is updated synchronously
             absorption_volume = await self.check_absorption(symbol, direction, absorption_window)
-            absorption_detected = absorption_volume >= self.absorption_threshold
+            absorption_detected = absorption_volume >= absorption_threshold
             
-            # Step 6: Calculate confidence
+            # Step 6: Calculate confidence (relative to coin's threshold)
             confidence = self.calculate_confidence(
                 total_volume=total_volume,
                 absorption_volume=absorption_volume,
                 directional_pct=directional_pct,
-                liquidation_count=len(liquidations)
+                liquidation_count=len(liquidations),
+                cascade_threshold=cascade_threshold
             )
             
             # Create signal
@@ -279,52 +316,61 @@ class StopHuntDetector:
         return (min(prices), max(prices))
     
     def calculate_confidence(
-        self, 
-        total_volume: float, 
+        self,
+        total_volume: float,
         absorption_volume: float,
         directional_pct: float,
-        liquidation_count: int
+        liquidation_count: int,
+        cascade_threshold: float = 2_000_000
     ) -> float:
         """
         Calculate confidence score (0-99%)
-        
+
+        Uses volume ratios relative to threshold so small coins
+        get fair scoring (e.g. $100K on a $50K-threshold coin
+        scores the same as $4M on a $2M-threshold coin).
+
         Factors:
-        - Total liquidation volume (higher = more significant)
-        - Absorption volume (higher = more confident)
+        - Total liquidation volume relative to threshold
+        - Absorption volume relative to cascade
         - Directional clarity (one-sided = more confident)
         - Number of liquidations (more = more reliable)
-        
+
         Args:
             total_volume: Total liquidation volume
             absorption_volume: Whale absorption volume
             directional_pct: Percentage in main direction (0.0-1.0)
             liquidation_count: Number of liquidation events
-            
+            cascade_threshold: The threshold used for this coin tier
+
         Returns:
             Confidence score (0-99%)
         """
         confidence = 50.0  # Base
-        
-        # Factor 1: Total volume
-        if total_volume > 10_000_000:  # $10M+
+
+        # Factor 1: Volume relative to threshold (works for any coin size)
+        volume_ratio = total_volume / max(cascade_threshold, 1)
+        if volume_ratio > 5.0:
             confidence += 25
-        elif total_volume > 5_000_000:  # $5M+
+        elif volume_ratio > 2.5:
             confidence += 20
-        elif total_volume > 3_000_000:  # $3M+
+        elif volume_ratio > 1.5:
             confidence += 15
-        elif total_volume > 2_000_000:  # $2M+
+        elif volume_ratio >= 1.0:
             confidence += 10
-        
-        # Factor 2: Absorption
-        if absorption_volume > 1_000_000:  # $1M+
-            confidence += 25
-        elif absorption_volume > 500_000:  # $500K+
-            confidence += 20
-        elif absorption_volume > 200_000:  # $200K+
-            confidence += 15
-        elif absorption_volume > 100_000:  # $100K+
-            confidence += 10
-        
+
+        # Factor 2: Absorption relative to total volume
+        if total_volume > 0:
+            absorption_ratio = absorption_volume / total_volume
+            if absorption_ratio > 0.3:
+                confidence += 25
+            elif absorption_ratio > 0.2:
+                confidence += 20
+            elif absorption_ratio > 0.1:
+                confidence += 15
+            elif absorption_ratio > 0.05:
+                confidence += 10
+
         # Factor 3: Directional clarity
         if directional_pct > 0.9:  # >90% one direction
             confidence += 15
@@ -332,13 +378,13 @@ class StopHuntDetector:
             confidence += 12
         elif directional_pct > 0.7:  # >70%
             confidence += 8
-        
+
         # Factor 4: Liquidation count
         if liquidation_count > 100:
             confidence += 5
         elif liquidation_count > 50:
             confidence += 3
-        
+
         return min(confidence, 99.0)  # Cap at 99%
     
     def get_stats(self) -> dict:

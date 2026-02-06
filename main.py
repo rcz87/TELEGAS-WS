@@ -1,22 +1,26 @@
 # TELEGLAS Pro - Main Entry Point
-# Real-Time Market Intelligence System - PRODUCTION READY v2.0
-# FIXED: Priority 1 bugs - subscription, type mismatch, config alignment
+# Real-Time Market Intelligence System - PRODUCTION READY v3.0
+# ALL-COIN monitoring with dynamic tiered thresholds
 
 """
-TELEGLAS Pro - Complete Integration with Bug Fixes
+TELEGLAS Pro - Complete Integration v3.0
 
 Connects all layers into working system:
 WebSocket → Processors → Analyzers → Signals → Alerts → Telegram
 
 Provides 30-90 second information edge through:
-- Stop Hunt Detection ($2M+ liquidation cascades)
+- Stop Hunt Detection (dynamic thresholds per coin tier)
 - Order Flow Analysis (whale tracking)
 - Event Pattern Detection (market anomalies)
+- ALL-coin monitoring via liquidationOrders channel
+- Dynamic trade subscriptions for active coins
 
-FIXES:
-- Added subscription logic (BUG #1)
-- Fixed type mismatch in on_message (BUG #2)
-- Aligned config keys with config.yaml (BUG #3)
+v3.0 Changes:
+- ALL coins from CoinGlass are now monitored (not just 3)
+- Dynamic tiered thresholds: BTC $2M, mid-caps $200K, small coins $50K
+- Auto-discovery of new coins from liquidation data
+- Expanded trade subscriptions (primary + secondary)
+- Fixed parameter name bugs in buffer calls
 """
 
 import asyncio
@@ -85,18 +89,25 @@ class TeleglasPro:
             max_trades=buffers_config.get('max_trades', 500)
         )
         
-        # Analyzers (using correct config paths)
+        # Monitoring config for dynamic all-coin thresholds
+        monitoring_config = config.get('monitoring', {})
+
+        # Analyzers (using correct config paths + monitoring tiers)
         detection_config = config.get('detection', {})
         self.stop_hunt_detector = StopHuntDetector(
             self.buffer_manager,
             threshold=thresholds.get('liquidation_cascade', 2_000_000),
-            absorption_min_order_usd=detection_config.get('absorption_min_order_usd', 5000)
+            absorption_min_order_usd=detection_config.get('absorption_min_order_usd', 5000),
+            monitoring_config=monitoring_config
         )
         self.order_flow_analyzer = OrderFlowAnalyzer(
             self.buffer_manager,
             large_order_threshold=thresholds.get('large_order_threshold', 10_000)
         )
-        self.event_detector = EventPatternDetector(self.buffer_manager)
+        self.event_detector = EventPatternDetector(
+            self.buffer_manager,
+            monitoring_config=monitoring_config
+        )
         
         # Signals
         self.signal_generator = SignalGenerator(
@@ -144,9 +155,20 @@ class TeleglasPro:
             heartbeat_interval=ws_config.get('heartbeat_interval', 20)
         )
         
-        # Symbols to monitor
-        self.symbols = pairs_config.get('primary', ['BTCUSDT', 'ETHUSDT'])
-        
+        # Symbols configuration
+        # primary = coins with trade data subscription
+        # secondary = additional coins with trade data subscription
+        # ALL coins from liquidationOrders are monitored regardless
+        self.primary_symbols = pairs_config.get('primary', ['BTCUSDT', 'ETHUSDT'])
+        self.secondary_symbols = pairs_config.get('secondary', [])
+        self.trade_symbols = self.primary_symbols + self.secondary_symbols
+        self.monitoring_mode = monitoring_config.get('mode', 'all')
+        self.max_concurrent_analysis = monitoring_config.get('max_concurrent_analysis', 30)
+
+        # Track dynamically discovered coins (from liquidation data)
+        self.discovered_symbols: set = set()
+        self._trade_subscribed: set = set()  # Symbols with active trade subscriptions
+
         # Debouncing (FIX: Prevent task explosion)
         self.analysis_locks = {}  # Per-symbol locks
         self.last_analysis = {}   # Per-symbol last analysis time
@@ -170,8 +192,8 @@ class TeleglasPro:
         # CRITICAL FIX Bug #2: Initialization flag to prevent race condition
         self.initialized = False
         
-        # Initialize dashboard with starting coins
-        dashboard_api.initialize_coins(self.symbols)
+        # Initialize dashboard with configured coins (more will be auto-added)
+        dashboard_api.initialize_coins(self.trade_symbols)
         
         # Start dashboard server in background thread
         self.dashboard_thread = threading.Thread(
@@ -201,8 +223,8 @@ class TeleglasPro:
         else:
             self.logger.error("❌ Failed to subscribe to liquidationOrders")
         
-        # Optional: Subscribe to futures trades for major pairs
-        for symbol in self.symbols[:3]:  # Limit to top 3 to avoid overwhelming
+        # Subscribe to futures trades for all configured coins (primary + secondary)
+        for symbol in self.trade_symbols:
             trade_channel = f"futures_trades@all_{symbol}@0"
             subscribe_msg = {
                 "method": "subscribe",
@@ -210,7 +232,13 @@ class TeleglasPro:
             }
             success = await self.websocket_client.send_message(subscribe_msg)
             if success:
+                self._trade_subscribed.add(symbol)
                 self.logger.info(f"📡 Subscribed to {trade_channel}")
+
+        self.logger.info(
+            f"📡 Trade subscriptions: {len(self._trade_subscribed)} coins | "
+            f"Liquidations: ALL coins (mode={self.monitoring_mode})"
+        )
     
     async def on_message(self, raw_message):
         """
@@ -254,36 +282,38 @@ class TeleglasPro:
     
     async def _handle_liquidation_message(self, message: dict):
         """
-        Process liquidation order messages
-        FIX BUG #2: Proper handling of dict message
+        Process liquidation order messages from ALL coins.
+
+        CoinGlass liquidationOrders channel sends data for ALL coins.
+        We now process ALL of them (not just primary 3) with dynamic thresholds.
         """
         try:
             # Extract liquidation events from message
             data = message.get('data', [])
             if not isinstance(data, list):
                 data = [data] if data else []
-            
+
             for liq_event in data:
                 # Validate structure
                 validation = self.data_validator.validate_liquidation(liq_event)
                 if validation.is_valid:
-                    # Extract fields
                     symbol = liq_event.get('symbol', 'UNKNOWN')
-                    price = float(liq_event.get('price', 0))
-                    side = int(liq_event.get('side', 0))
-                    volume_usd = float(liq_event.get('volUsd', 0))
-                    timestamp_ms = liq_event.get('time', 0)
-                    
-                    # Add to buffer
+
+                    # Add to buffer (FIX: was 'liquidation_data=' - wrong param name)
                     self.buffer_manager.add_liquidation(
                         symbol=symbol,
-                        liquidation_data=liq_event
+                        event=liq_event
                     )
-                    
+
                     self.stats['liquidations_processed'] += 1
-                    
-                    # Trigger analysis for this symbol only (debounced)
-                    if symbol in self.symbols:
+
+                    # Track newly discovered coins
+                    if symbol not in self.discovered_symbols and symbol not in self.trade_symbols:
+                        self.discovered_symbols.add(symbol)
+                        self.logger.info(f"🔍 New coin discovered: {symbol}")
+
+                    # Trigger analysis for ALL coins (debounced, resource-limited)
+                    if len(self._analysis_tasks) < self.max_concurrent_analysis:
                         task = asyncio.create_task(self.analyze_and_alert(symbol))
                         self._analysis_tasks.add(task)
                         task.add_done_callback(self._analysis_tasks.discard)
@@ -294,31 +324,31 @@ class TeleglasPro:
     
     async def _handle_trade_message(self, message: dict):
         """
-        Process trade messages
-        FIX BUG #2: Proper handling of dict message
+        Process trade messages for subscribed coins.
+        Trade data enhances analysis (absorption detection, order flow).
         """
         try:
             # Extract trade events from message
             data = message.get('data', [])
             if not isinstance(data, list):
                 data = [data] if data else []
-            
+
             for trade in data:
                 # Validate structure
                 validation = self.data_validator.validate_trade(trade)
                 if validation.is_valid:
                     symbol = trade.get('symbol', 'UNKNOWN')
-                    
-                    # Add to buffer
+
+                    # Add to buffer (FIX: was 'trade_data=' - wrong param name)
                     self.buffer_manager.add_trade(
                         symbol=symbol,
-                        trade_data=trade
+                        event=trade
                     )
-                    
+
                     self.stats['trades_processed'] += 1
-                    
-                    # Trigger analysis for this symbol (debounced)
-                    if symbol in self.symbols:
+
+                    # Trigger analysis for this symbol (debounced, resource-limited)
+                    if len(self._analysis_tasks) < self.max_concurrent_analysis:
                         task = asyncio.create_task(self.analyze_and_alert(symbol))
                         self._analysis_tasks.add(task)
                         task.add_done_callback(self._analysis_tasks.discard)
@@ -467,6 +497,7 @@ class TeleglasPro:
                 self.logger.info(f"   Signals: {self.stats['signals_generated']} generated")
                 self.logger.info(f"   Alerts: {self.stats['alerts_sent']} sent")
                 self.logger.info(f"   Errors: {self.stats['errors']}")
+                self.logger.info(f"   Coins tracked: {len(self.buffer_manager.get_tracked_symbols())} (discovered: {len(self.discovered_symbols)})")
     
     async def signal_tracker_task(self):
         """Background task: check signal outcomes every 60 seconds"""
@@ -477,6 +508,49 @@ class TeleglasPro:
                 await self.signal_tracker.check_outcomes()
             except Exception as e:
                 self.logger.error(f"Signal tracker error: {e}")
+
+    async def dynamic_subscription_task(self):
+        """
+        Background task: subscribe to trade channels for newly discovered
+        coins that show significant liquidation activity.
+
+        Runs every 5 minutes. If a discovered coin has liquidation
+        data in the buffer, subscribe to its trade channel for
+        richer analysis (absorption detection, order flow).
+        """
+        while not shutdown_event.is_set():
+            await asyncio.sleep(300)  # Check every 5 minutes
+            try:
+                for symbol in list(self.discovered_symbols):
+                    if symbol in self._trade_subscribed:
+                        continue
+
+                    # Check if this coin has recent liquidation activity
+                    liqs = self.buffer_manager.get_liquidations(symbol, time_window=300)
+                    if len(liqs) >= 3:  # At least 3 liquidations in 5 min = worth subscribing
+                        trade_channel = f"futures_trades@all_{symbol}@0"
+                        subscribe_msg = {
+                            "method": "subscribe",
+                            "channels": [trade_channel]
+                        }
+                        success = await self.websocket_client.send_message(subscribe_msg)
+                        if success:
+                            self._trade_subscribed.add(symbol)
+                            self.logger.info(
+                                f"📡 Dynamic subscription: {trade_channel} "
+                                f"({len(liqs)} liquidations detected)"
+                            )
+
+                            # Also add to dashboard
+                            dashboard_api.add_signal({
+                                'symbol': symbol,
+                                'type': 'DISCOVERY',
+                                'confidence': 0,
+                                'description': f"New coin discovered with {len(liqs)} liquidations"
+                            })
+
+            except Exception as e:
+                self.logger.error(f"Dynamic subscription error: {e}")
 
     async def cleanup_task(self):
         """Background task: cleanup old data every hour"""
@@ -492,7 +566,7 @@ class TeleglasPro:
     async def run(self):
         """Run the complete system"""
         self.logger.info("=" * 60)
-        self.logger.info("🚀 TELEGLAS Pro - Starting (v2.0 - Bug Fixes)")
+        self.logger.info("🚀 TELEGLAS Pro v3.0 - Starting (ALL-COIN Monitoring)")
         self.logger.info("=" * 60)
         
         try:
@@ -525,13 +599,15 @@ class TeleglasPro:
                 asyncio.create_task(self.alert_processor()),
                 asyncio.create_task(self.stats_reporter()),
                 asyncio.create_task(self.cleanup_task()),
-                asyncio.create_task(self.signal_tracker_task())
+                asyncio.create_task(self.signal_tracker_task()),
+                asyncio.create_task(self.dynamic_subscription_task())
             ]
             
             self.logger.info("=" * 60)
-            self.logger.info("✅ TELEGLAS Pro - Running")
+            self.logger.info("✅ TELEGLAS Pro v3.0 - Running (ALL-COIN Monitoring)")
             self.logger.info("=" * 60)
-            self.logger.info(f"Monitoring symbols: {', '.join(self.symbols)}")
+            self.logger.info(f"Trade subscriptions: {', '.join(self.trade_symbols)}")
+            self.logger.info(f"Liquidation monitoring: ALL coins (mode={self.monitoring_mode})")
             self.logger.info("Press Ctrl+C to stop")
             
             # Wait for shutdown
