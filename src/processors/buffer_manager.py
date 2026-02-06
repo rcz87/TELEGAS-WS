@@ -81,7 +81,11 @@ class BufferManager:
             buffer = self.liquidation_buffers[symbol]
             if len(buffer) >= self.max_liquidations:
                 self._dropped_liquidations += 1
-            
+                if self._dropped_liquidations % 100 == 1:  # Log setiap 100 drops, bukan setiap kali
+                    self.logger.warning(
+                        f"Buffer overflow for {symbol}: {self._dropped_liquidations} liquidations dropped total"
+                    )
+
             # Add to buffer
             buffer.append(event)
             self._total_liquidations += 1
@@ -117,7 +121,11 @@ class BufferManager:
             buffer = self.trade_buffers[symbol]
             if len(buffer) >= self.max_trades:
                 self._dropped_trades += 1
-            
+                if self._dropped_trades % 100 == 1:  # Log setiap 100 drops, bukan setiap kali
+                    self.logger.warning(
+                        f"Buffer overflow for {symbol}: {self._dropped_trades} trades dropped total"
+                    )
+
             # Add to buffer
             buffer.append(event)
             self._total_trades += 1

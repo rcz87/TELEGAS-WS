@@ -54,19 +54,21 @@ class StopHuntDetector:
     - Confidence scoring
     """
     
-    def __init__(self, buffer_manager, threshold: float = 2000000, absorption_threshold: float = 100000):
+    def __init__(self, buffer_manager, threshold: float = 2000000, absorption_threshold: float = 100000, absorption_min_order_usd: float = 5000):
         """
         Initialize stop hunt detector
-        
+
         Args:
             buffer_manager: BufferManager instance
             threshold: Minimum liquidation volume for cascade (default $2M)
             absorption_threshold: Minimum absorption volume (default $100K)
+            absorption_min_order_usd: Minimum single order size for absorption (default $5K)
         """
         self.buffer_manager = buffer_manager
         self.threshold = threshold
         self.absorption_threshold = absorption_threshold
-        
+        self.absorption_min_order_usd = absorption_min_order_usd
+
         self.logger = setup_logger("StopHuntDetector", "INFO")
         self._detections = 0
         
@@ -245,8 +247,8 @@ class StopHuntDetector:
                 side = int(trade.get("side", 0))
                 vol = float(trade.get("volume_usd", trade.get("vol", 0)))
                 
-                # Only count large orders (>$5K)
-                if side == target_side and vol > 5000:
+                # Only count large orders (>absorption_min_order_usd)
+                if side == target_side and vol > self.absorption_min_order_usd:
                     absorption_volume += vol
             
             return absorption_volume
