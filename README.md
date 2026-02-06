@@ -135,6 +135,26 @@ dashboard:
 
 ---
 
+## Environment Variables
+
+Create `config/secrets.env` from the example file:
+
+```bash
+cp config/secrets.env.example config/secrets.env
+```
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `COINGLASS_API_KEY` | Yes | CoinGlass API key for WebSocket data feed |
+| `TELEGRAM_BOT_TOKEN` | No | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_CHAT_ID` | No | Target Telegram chat/group ID for alerts |
+| `DATABASE_URL` | No | SQLite path (default: `sqlite:///data/teleglas.db`) |
+| `PROMETHEUS_PORT` | No | Prometheus metrics port (default: `9090`) |
+
+> **Note:** `secrets.env` is in `.gitignore` and will never be committed.
+
+---
+
 ## Security Features
 
 ### Authentication & Authorization
@@ -248,6 +268,99 @@ GET  /docs                          # Auto-generated API docs
 
 ---
 
+## Deployment (Production VPS)
+
+### Prerequisites
+- Ubuntu 20.04+ VPS with 1GB+ RAM
+- Node.js 16+ (for PM2 process manager)
+- Python 3.10+
+
+### Setup
+
+```bash
+# 1. Clone and install
+git clone https://github.com/rcz87/TELEGAS-WS.git
+cd TELEGAS-WS
+pip3 install -r requirements.txt
+
+# 2. Configure
+cp config/secrets.env.example config/secrets.env
+nano config/secrets.env          # Add API keys
+nano config/config.yaml          # Set api_token, cors_origins with your VPS IP
+
+# 3. Create required directories
+mkdir -p logs data
+
+# 4. Install PM2
+npm install -g pm2
+
+# 5. Start with PM2
+./scripts/start.sh               # or: pm2 start ecosystem.config.js
+
+# 6. Enable auto-start on reboot
+pm2 save && pm2 startup
+
+# 7. Configure firewall
+ufw allow 22/tcp                 # SSH
+ufw allow 8080/tcp               # Dashboard
+ufw enable
+```
+
+### Management Scripts
+
+| Script | Description |
+|--------|-------------|
+| `./scripts/start.sh` | Start via PM2 |
+| `./scripts/stop.sh` | Stop the process |
+| `./scripts/restart.sh` | Restart the process |
+| `./scripts/status.sh` | Show PM2 status |
+| `./scripts/logs.sh` | Tail live logs |
+| `./scripts/update.sh` | Pull from GitHub + restart |
+| `./scripts/check.sh` | System health check |
+| `./scripts/verify-deployment.sh` | Full deployment verification (30+ checks) |
+
+### PM2 Configuration
+
+`ecosystem.config.js` provides:
+- Auto-restart on crash (max 10 restarts with 4s delay)
+- Memory limit: 1GB (auto-restart if exceeded)
+- Log files: `logs/output.log`, `logs/error.log`
+- Timestamped logs with merge
+
+---
+
+## Testing
+
+### Component Test Scripts
+
+```bash
+# Test WebSocket connection to CoinGlass
+python scripts/test_websocket.py
+
+# Test data processors (validator + buffer)
+python scripts/test_processors.py
+
+# Test analyzers (stop hunt, order flow, events)
+python scripts/test_analyzers.py
+
+# Test signal pipeline (generator + validator + scorer)
+python scripts/test_signals.py
+
+# Test alert system (telegram + queue)
+python scripts/test_alerts.py
+```
+
+> **Note:** `test_websocket.py` requires a valid `COINGLASS_API_KEY` in `config/secrets.env`.
+
+### Deployment Verification
+
+```bash
+# Full system verification (dependencies, config, firewall, PM2, resources)
+./scripts/verify-deployment.sh
+```
+
+---
+
 ## Signal Types
 
 | Signal | Direction | Trigger | Confidence |
@@ -264,7 +377,7 @@ GET  /docs                          # Auto-generated API docs
 
 ## Engineering Review Log
 
-### v4.0 (Current) - 45+ bug fixes across 6 review sessions
+### v4.0 (Current) - 60+ bug fixes across 7 review sessions
 
 **Session 1** - Initial security review (8 fixes)
 - Input sanitization, rate limiting, auth on all endpoints
@@ -336,6 +449,26 @@ GET  /docs                          # Auto-generated API docs
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## Troubleshooting
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| No signals generated | Events silently rejected | Check logs for "validation" errors. CoinGlass sends numeric strings — v4.0 handles this |
+| Dashboard not loading | Port blocked or wrong CORS | `ufw allow 8080/tcp`, add VPS IP to `cors_origins` in `config.yaml` |
+| WebSocket keeps reconnecting | Invalid API key or network issue | Verify `COINGLASS_API_KEY` in `secrets.env`, check `pm2 logs` |
+| Telegram alerts not sending | Wrong token or chat ID | Test with `python scripts/test_alerts.py`, verify bot is added to chat |
+| "Token not configured" warning | Using placeholder token | Generate a real token: `openssl rand -hex 32`, update `config.yaml` |
+| High memory usage | Buffer accumulation | Restart with `./scripts/restart.sh`, PM2 auto-restarts at 1GB |
+| SQLite locked errors | Concurrent write attempts | v4.0 uses atomic transactions and connection guards to prevent this |
+
+---
+
+## Disclaimer
+
+> **This software is for informational and educational purposes only.** It is not financial advice. Cryptocurrency trading involves substantial risk of loss. Past performance of signals does not guarantee future results. The authors are not responsible for any financial losses incurred from using this system. Always do your own research (DYOR) and never trade with funds you cannot afford to lose.
 
 ---
 
