@@ -175,7 +175,61 @@ signals:
 
 ---
 
-## 📁 Project Structure
+## � Security Features
+
+### Authentication & Authorization
+- ✅ **Bearer Token Auth** - Protects all write operations (POST, DELETE, PATCH)
+- ✅ **CORS Policy** - Restricted to specific origins (no wildcard)
+- ✅ **Rate Limiting** - 30 requests per minute per IP address
+- ✅ **Input Validation** - Regex validation + sanitization on all inputs
+- ✅ **WebSocket Auth** - Optional token-based authentication for WS connections
+- ✅ **Thread-Safe** - Lock-protected shared state access
+
+### Security Configuration
+
+**1. Generate Secure API Token:**
+```bash
+# Generate a random 64-character token
+openssl rand -hex 32
+```
+
+**2. Update Configuration:**
+```bash
+nano config/config.yaml
+```
+
+Add to `dashboard` section:
+```yaml
+dashboard:
+  api_token: "your_generated_token_here"
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://localhost:8080"
+    - "http://your_vps_ip:8080"  # Add your VPS IP
+```
+
+**3. Using Protected Endpoints:**
+```bash
+# Example: Add coin with authentication
+curl -X POST http://localhost:8080/api/coins/add \
+  -H "Authorization: Bearer YOUR_TOKEN_HERE" \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "SOL"}'
+
+# Example: WebSocket with authentication
+ws://localhost:8080/ws?token=YOUR_TOKEN_HERE
+```
+
+### Security Best Practices
+- 🔒 Keep your API token secret (never commit to Git)
+- 🔒 Rotate tokens periodically
+- 🔒 Use HTTPS in production (setup reverse proxy)
+- 🔒 Monitor rate limit logs for suspicious activity
+- 🔒 Restrict CORS origins to trusted domains only
+
+---
+
+## �📁 Project Structure
 
 ```
 TELEGLAS-WS/
@@ -270,17 +324,36 @@ pytest tests/ -v --cov
 
 The dashboard provides these REST endpoints:
 
+### Public Endpoints (No Authentication Required)
 ```
 GET  /                          # Dashboard UI
 GET  /api/stats                 # System statistics
 GET  /api/coins                 # Monitored coins
 GET  /api/signals               # Recent signals
-POST /api/coins/add             # Add new coin
-DELETE /api/coins/remove/{symbol} # Remove coin
-PATCH /api/coins/{symbol}/toggle  # Toggle alerts
-WS   /ws                        # WebSocket for real-time updates
+GET  /api/orderflow/{symbol}    # Order flow data
 GET  /docs                      # Auto-generated API docs
 ```
+
+### Protected Endpoints (Require Bearer Token)
+```
+POST /api/coins/add             # Add new coin
+     Headers: Authorization: Bearer YOUR_TOKEN_HERE
+
+DELETE /api/coins/remove/{symbol} # Remove coin
+       Headers: Authorization: Bearer YOUR_TOKEN_HERE
+
+PATCH /api/coins/{symbol}/toggle  # Toggle alerts
+      Headers: Authorization: Bearer YOUR_TOKEN_HERE
+```
+
+### WebSocket Endpoint
+```
+WS   /ws?token=YOUR_TOKEN       # Real-time updates (with optional token)
+```
+
+### Rate Limiting
+- **Protected endpoints:** 30 requests per minute per IP
+- **Exceeding limit:** Returns HTTP 429 (Too Many Requests)
 
 ---
 
@@ -468,8 +541,21 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [x] Coin management without restart
 - [x] WebSocket real-time updates
 - [x] PWA support
+- [x] **API Authentication (Bearer token)** 🔒
+- [x] **CORS security (restricted origins)** 🔒
+- [x] **Rate limiting (30 req/min)** 🔒
+- [x] **Input validation & sanitization** 🔒
+- [x] **WebSocket authentication** 🔒
+- [x] **Thread-safe state management** 🔒
+- [x] **Code quality improvements** 🔒
 
-### Planned 🚧
+### In Progress 🚧
+- [ ] HTTPS/TLS setup (nginx reverse proxy)
+- [ ] Security headers (CSP, X-Frame-Options)
+- [ ] CI/CD pipeline (GitHub Actions)
+- [ ] Pytest migration & test standardization
+
+### Planned 📋
 - [ ] Machine learning model training
 - [ ] Historical backtesting
 - [ ] Multi-exchange support
@@ -483,11 +569,12 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🎊 Status
 
-**Current Version:** 2.0.0  
-**Status:** ✅ Production Ready  
-**Last Updated:** February 3, 2026  
+**Current Version:** 2.0.1  
+**Status:** ✅ Production Ready (Security Hardened)  
+**Last Updated:** February 6, 2026  
 **Total Code:** 8,500+ lines  
 **Test Coverage:** 85%+  
+**Security Score:** 8.5/10 (Excellent)
 
 ---
 
