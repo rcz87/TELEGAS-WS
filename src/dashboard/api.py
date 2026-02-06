@@ -38,7 +38,16 @@ if _config_path.exists():
         _full_config = yaml.safe_load(_f)
         _dashboard_config = _full_config.get("dashboard", {})
 
-API_TOKEN = _dashboard_config.get("api_token", "")
+_raw_token = _dashboard_config.get("api_token", "")
+# Reject placeholder token — treat as no auth (force user to set real token)
+if _raw_token and "GANTI" in _raw_token.upper():
+    import logging
+    logging.getLogger("DashboardAPI").warning(
+        "api_token is still the default placeholder — auth DISABLED. "
+        "Set a real token in config/config.yaml → dashboard.api_token"
+    )
+    _raw_token = ""
+API_TOKEN = _raw_token
 CORS_ORIGINS = _dashboard_config.get("cors_origins", ["http://localhost:3000"])
 
 async def verify_token(authorization: str = Header(None)):
@@ -399,13 +408,22 @@ async def websocket_endpoint(websocket: WebSocket):
     - Real-time updates for stats, signals, order flow
     - Coin add/remove/toggle events
     """
-    # Optional auth check
-    if API_TOKEN:
-        token = websocket.query_params.get("token", "")
-        if token != API_TOKEN:
-            await websocket.close(code=4003, reason="Invalid token")
-            return
+    # Accept connection first, then authenticate via first message
+    # (avoids exposing token in URL query params / server logs)
     await websocket.accept()
+
+    if API_TOKEN:
+        try:
+            # Wait for auth message within 5 seconds
+            auth_msg = await asyncio.wait_for(websocket.receive_json(), timeout=5.0)
+            if auth_msg.get("type") != "auth" or auth_msg.get("token") != API_TOKEN:
+                await websocket.send_json({"type": "error", "message": "Invalid token"})
+                await websocket.close(code=4003, reason="Invalid token")
+                return
+        except (asyncio.TimeoutError, Exception):
+            await websocket.close(code=4003, reason="Auth timeout")
+            return
+
     active_connections.append(websocket)
     
     # CRITICAL FIX: Wait for system initialization (max 3 seconds)

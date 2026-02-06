@@ -54,15 +54,16 @@ function dashboard() {
         // WebSocket Connection
         connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            let wsUrl = `${protocol}//${window.location.host}/ws`;
-            if (this.apiToken) {
-                wsUrl += `?token=${this.apiToken}`;
-            }
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
 
             console.log('Connecting to WebSocket:', wsUrl);
             this.ws = new WebSocket(wsUrl);
-            
+
             this.ws.onopen = () => {
+                // Send auth as first message (not in URL to avoid log exposure)
+                if (this.apiToken) {
+                    this.ws.send(JSON.stringify({type: 'auth', token: this.apiToken}));
+                }
                 this.isConnected = true;
                 console.log('✅ WebSocket connected');
             };
