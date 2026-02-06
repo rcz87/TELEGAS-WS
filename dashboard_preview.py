@@ -24,7 +24,7 @@ def main():
     logger.info("This is for UI preview only - no real data")
     logger.info("")
     logger.info("Dashboard URL: http://0.0.0.0:8080")
-    logger.info("Public URL: http://31.97.107.243:8080")
+    logger.info("Public URL: http://YOUR_VPS_IP:8080")
     logger.info("")
     logger.info("Press Ctrl+C to stop")
     logger.info("=" * 60)

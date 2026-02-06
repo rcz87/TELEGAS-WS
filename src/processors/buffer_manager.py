@@ -12,7 +12,9 @@ Responsibilities:
 - Automatic cleanup
 """
 
+import threading
 from collections import deque
+from copy import deepcopy
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 import time
@@ -61,86 +63,76 @@ class BufferManager:
         self._hourly_trade_volume: Dict[str, deque] = {}
         self._last_hourly_update: float = 0
 
+        # Thread safety
+        self._lock = threading.Lock()
+
         # Logger
         self.logger = setup_logger("BufferManager", "INFO")
         
     def add_liquidation(self, symbol: str, event: dict):
         """
-        Add liquidation event to buffer
-        
+        Add liquidation event to buffer (thread-safe)
+
         Args:
             symbol: Trading pair (e.g., "BTCUSDT")
             event: Liquidation event data
         """
         try:
-            # Ensure buffer exists
-            if symbol not in self.liquidation_buffers:
-                self.liquidation_buffers[symbol] = deque(maxlen=self.max_liquidations)
-                self._symbols_tracked.add(symbol)
-                self.logger.debug(f"Created liquidation buffer for {symbol}")
-            
-            # Add event with current timestamp if not present
-            if "timestamp" not in event:
-                event["timestamp"] = int(time.time() * 1000)  # milliseconds
-            
-            # CRITICAL FIX Bug #10: Track if buffer is full (will drop oldest)
-            buffer = self.liquidation_buffers[symbol]
-            if len(buffer) >= self.max_liquidations:
-                self._dropped_liquidations += 1
-                if self._dropped_liquidations % 100 == 1:  # Log setiap 100 drops, bukan setiap kali
-                    self.logger.warning(
-                        f"Buffer overflow for {symbol}: {self._dropped_liquidations} liquidations dropped total"
-                    )
+            # Copy to avoid mutating caller's dict
+            event_copy = dict(event)
+            if "timestamp" not in event_copy:
+                event_copy["timestamp"] = int(time.time() * 1000)
 
-            # Add to buffer
-            buffer.append(event)
-            self._total_liquidations += 1
-            
-            self.logger.debug(
-                f"Added liquidation: {symbol} - "
-                f"Buffer size: {len(self.liquidation_buffers[symbol])}"
-            )
-            
+            with self._lock:
+                if symbol not in self.liquidation_buffers:
+                    self.liquidation_buffers[symbol] = deque(maxlen=self.max_liquidations)
+                    self._symbols_tracked.add(symbol)
+                    self.logger.debug(f"Created liquidation buffer for {symbol}")
+
+                buffer = self.liquidation_buffers[symbol]
+                if len(buffer) >= self.max_liquidations:
+                    self._dropped_liquidations += 1
+                    if self._dropped_liquidations % 100 == 1:
+                        self.logger.warning(
+                            f"Buffer overflow: {self._dropped_liquidations} liquidations dropped total"
+                        )
+
+                buffer.append(event_copy)
+                self._total_liquidations += 1
+
         except Exception as e:
             self.logger.error(f"Failed to add liquidation: {e}")
     
     def add_trade(self, symbol: str, event: dict):
         """
-        Add trade event to buffer
-        
+        Add trade event to buffer (thread-safe)
+
         Args:
             symbol: Trading pair (e.g., "ETHUSDT")
             event: Trade event data
         """
         try:
-            # Ensure buffer exists
-            if symbol not in self.trade_buffers:
-                self.trade_buffers[symbol] = deque(maxlen=self.max_trades)
-                self._symbols_tracked.add(symbol)
-                self.logger.debug(f"Created trade buffer for {symbol}")
-            
-            # Add event with current timestamp if not present
-            if "timestamp" not in event:
-                event["timestamp"] = int(time.time() * 1000)  # milliseconds
-            
-            # CRITICAL FIX Bug #10: Track if buffer is full (will drop oldest)
-            buffer = self.trade_buffers[symbol]
-            if len(buffer) >= self.max_trades:
-                self._dropped_trades += 1
-                if self._dropped_trades % 100 == 1:  # Log setiap 100 drops, bukan setiap kali
-                    self.logger.warning(
-                        f"Buffer overflow for {symbol}: {self._dropped_trades} trades dropped total"
-                    )
+            event_copy = dict(event)
+            if "timestamp" not in event_copy:
+                event_copy["timestamp"] = int(time.time() * 1000)
 
-            # Add to buffer
-            buffer.append(event)
-            self._total_trades += 1
-            
-            self.logger.debug(
-                f"Added trade: {symbol} - "
-                f"Buffer size: {len(self.trade_buffers[symbol])}"
-            )
-            
+            with self._lock:
+                if symbol not in self.trade_buffers:
+                    self.trade_buffers[symbol] = deque(maxlen=self.max_trades)
+                    self._symbols_tracked.add(symbol)
+                    self.logger.debug(f"Created trade buffer for {symbol}")
+
+                buffer = self.trade_buffers[symbol]
+                if len(buffer) >= self.max_trades:
+                    self._dropped_trades += 1
+                    if self._dropped_trades % 100 == 1:
+                        self.logger.warning(
+                            f"Buffer overflow: {self._dropped_trades} trades dropped total"
+                        )
+
+                buffer.append(event_copy)
+                self._total_trades += 1
+
         except Exception as e:
             self.logger.error(f"Failed to add trade: {e}")
     
@@ -354,23 +346,26 @@ class BufferManager:
         Snapshot current hour's volume per symbol for baseline comparison.
         Called periodically (e.g. every hour) from main.py cleanup_task.
         """
-        now = time.time()
-        for symbol in self._symbols_tracked:
-            # Liquidation volume this hour
-            liqs = self.get_liquidations(symbol, time_window=3600)
-            liq_vol = sum(float(l.get("volume_usd", l.get("vol", 0))) for l in liqs)
-            if symbol not in self._hourly_liq_volume:
-                self._hourly_liq_volume[symbol] = deque(maxlen=24)  # 24 hours
-            self._hourly_liq_volume[symbol].append((now, liq_vol))
+        try:
+            now = time.time()
+            for symbol in list(self._symbols_tracked):
+                liqs = self.get_liquidations(symbol, time_window=3600)
+                liq_vol = sum(float(l.get("vol", 0)) for l in liqs)
+                with self._lock:
+                    if symbol not in self._hourly_liq_volume:
+                        self._hourly_liq_volume[symbol] = deque(maxlen=24)
+                    self._hourly_liq_volume[symbol].append((now, liq_vol))
 
-            # Trade volume this hour
-            trades = self.get_trades(symbol, time_window=3600)
-            trade_vol = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in trades)
-            if symbol not in self._hourly_trade_volume:
-                self._hourly_trade_volume[symbol] = deque(maxlen=24)
-            self._hourly_trade_volume[symbol].append((now, trade_vol))
+                trades = self.get_trades(symbol, time_window=3600)
+                trade_vol = sum(float(t.get("vol", 0)) for t in trades)
+                with self._lock:
+                    if symbol not in self._hourly_trade_volume:
+                        self._hourly_trade_volume[symbol] = deque(maxlen=24)
+                    self._hourly_trade_volume[symbol].append((now, trade_vol))
 
-        self._last_hourly_update = now
+            self._last_hourly_update = now
+        except Exception as e:
+            self.logger.error(f"Hourly baseline update failed: {e}")
 
     def get_baseline(self, symbol: str) -> dict:
         """
@@ -392,32 +387,34 @@ class BufferManager:
             'hours_of_data': 0
         }
 
-        # Average from hourly snapshots
-        hourly_liqs = self._hourly_liq_volume.get(symbol, deque())
-        if hourly_liqs:
-            avg_liq = sum(v for _, v in hourly_liqs) / len(hourly_liqs)
-            result['avg_hourly_liq_volume'] = avg_liq
-            result['hours_of_data'] = len(hourly_liqs)
+        try:
+            with self._lock:
+                hourly_liqs = list(self._hourly_liq_volume.get(symbol, deque()))
+                hourly_trades = list(self._hourly_trade_volume.get(symbol, deque()))
 
-        hourly_trades = self._hourly_trade_volume.get(symbol, deque())
-        if hourly_trades:
-            avg_trade = sum(v for _, v in hourly_trades) / len(hourly_trades)
-            result['avg_hourly_trade_volume'] = avg_trade
+            if hourly_liqs:
+                avg_liq = sum(v for _, v in hourly_liqs) / len(hourly_liqs)
+                result['avg_hourly_liq_volume'] = avg_liq
+                result['hours_of_data'] = len(hourly_liqs)
 
-        # Current 30-min volume (to compare with hourly avg)
-        current_liqs = self.get_liquidations(symbol, time_window=1800)
-        current_liq_vol = sum(float(l.get("volume_usd", l.get("vol", 0))) for l in current_liqs)
-        result['current_liq_volume'] = current_liq_vol
+            if hourly_trades:
+                avg_trade = sum(v for _, v in hourly_trades) / len(hourly_trades)
+                result['avg_hourly_trade_volume'] = avg_trade
 
-        current_trades = self.get_trades(symbol, time_window=1800)
-        current_trade_vol = sum(float(t.get("volume_usd", t.get("vol", 0))) for t in current_trades)
-        result['current_trade_volume'] = current_trade_vol
+            current_liqs = self.get_liquidations(symbol, time_window=1800)
+            current_liq_vol = sum(float(l.get("vol", 0)) for l in current_liqs)
+            result['current_liq_volume'] = current_liq_vol
 
-        # Multiplier: current 30min extrapolated to 1hr vs avg
-        if result['avg_hourly_liq_volume'] > 0:
-            result['liq_multiplier'] = (current_liq_vol * 2) / result['avg_hourly_liq_volume']
-        if result['avg_hourly_trade_volume'] > 0:
-            result['trade_multiplier'] = (current_trade_vol * 2) / result['avg_hourly_trade_volume']
+            current_trades = self.get_trades(symbol, time_window=1800)
+            current_trade_vol = sum(float(t.get("vol", 0)) for t in current_trades)
+            result['current_trade_volume'] = current_trade_vol
+
+            if result['avg_hourly_liq_volume'] > 0:
+                result['liq_multiplier'] = (current_liq_vol * 2) / result['avg_hourly_liq_volume']
+            if result['avg_hourly_trade_volume'] > 0:
+                result['trade_multiplier'] = (current_trade_vol * 2) / result['avg_hourly_trade_volume']
+        except Exception as e:
+            self.logger.error(f"Baseline calculation failed for {symbol}: {e}")
 
         return result
 

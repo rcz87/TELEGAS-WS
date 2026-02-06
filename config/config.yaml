@@ -74,7 +74,7 @@ dashboard:
   cors_origins:
     - "http://localhost:3000"
     - "http://localhost:8080"
-    - "http://31.97.107.243:8080"
+    # Add your VPS IP here: "http://YOUR_VPS_IP:8080"
 
 # Dynamic Coin Monitoring
 # mode: "all" = process ALL coins from CoinGlass (recommended)

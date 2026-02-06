@@ -192,7 +192,7 @@ if [ $FAILED -eq 0 ] && [ $WARNINGS -eq 0 ]; then
     echo "🚀 Next Steps:"
     echo "   1. Add your API credentials to: config/secrets.env"
     echo "   2. Start the system: ./scripts/start.sh"
-    echo "   3. Access dashboard: http://31.97.107.243:8080"
+    echo "   3. Access dashboard: http://YOUR_VPS_IP:8080"
     EXIT_CODE=0
 elif [ $FAILED -eq 0 ]; then
     echo -e "${YELLOW}⚠️  DEPLOYMENT VERIFIED WITH WARNINGS${NC}"

@@ -154,10 +154,10 @@ class AlertQueue:
     async def retry(self, queued_alert: QueuedAlert) -> bool:
         """
         Re-queue failed alert for retry
-        
+
         Args:
             queued_alert: Failed alert to retry
-            
+
         Returns:
             True if re-queued, False if max retries reached
         """
@@ -167,24 +167,31 @@ class AlertQueue:
             )
             self._total_failed += 1
             return False
-        
+
         # Increment retry count
         queued_alert.retry_count += 1
         self._total_retried += 1
-        
+
         # Lower priority for retries (increase number)
         retry_priority = min(queued_alert.priority + 1, 3)
-        
+
         self.logger.info(
             f"🔄 Retrying alert (attempt {queued_alert.retry_count}/{queued_alert.max_retries})"
         )
-        
-        # Re-queue with lower priority
-        return await self.add(
-            queued_alert.alert,
-            priority=retry_priority,
-            max_retries=queued_alert.max_retries
-        )
+
+        # Re-queue: preserve retry_count by reusing the object with updated priority
+        queued_alert.priority = retry_priority
+        try:
+            await asyncio.wait_for(
+                self.queue.put(queued_alert),
+                timeout=1.0
+            )
+            self._total_queued += 1
+            return True
+        except asyncio.TimeoutError:
+            self.logger.error("Queue full - cannot retry alert")
+            self._total_failed += 1
+            return False
     
     async def get_batch(self, batch_size: int = 10, timeout: float = 1.0) -> list:
         """
@@ -249,7 +256,7 @@ class AlertQueue:
                 await asyncio.wait_for(self.queue.get(), timeout=0.1)
                 self.queue.task_done()
                 cleared += 1
-            except:
+            except Exception:
                 break
         
         if cleared > 0:

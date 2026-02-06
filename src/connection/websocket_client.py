@@ -89,58 +89,76 @@ class WebSocketClient:
         
     async def connect(self) -> bool:
         """
-        Establish WebSocket connection to CoinGlass
-        
+        Establish WebSocket connection to CoinGlass.
+        Uses iterative reconnect loop instead of recursion to avoid RecursionError.
+
         Returns:
             True if connected successfully, False otherwise
         """
-        if self.state == ConnectionState.CONNECTED:
-            self.logger.warning("Already connected")
-            return True
-            
-        try:
-            self.state = ConnectionState.CONNECTING
-            self.logger.info(f"Connecting to {self.url}...")
-            
-            # Establish WebSocket connection
-            self.connection = await websockets.connect(
-                self.url,
-                ping_interval=None,  # We'll handle ping manually
-                close_timeout=10
-            )
-            
-            # Authenticate
-            if not await self._authenticate():
-                self.logger.error("Authentication failed")
-                await self.disconnect()
-                return False
-            
-            self.state = ConnectionState.CONNECTED
-            self._reconnect_attempts = 0
-            self.logger.info("✅ Connected successfully")
-            
-            # Start background tasks
-            self._receive_task = asyncio.create_task(self._receive_loop())
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-            
-            # Call connect callback
-            if self.on_connect_callback:
-                await self.on_connect_callback()
-                
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Connection failed: {e}")
-            self.state = ConnectionState.DISCONNECTED
-            
-            if self.on_error_callback:
-                await self.on_error_callback(e)
-                
-            # Auto-reconnect
-            if self._should_reconnect:
-                await self._schedule_reconnect()
-                
-            return False
+        while True:
+            if self.state == ConnectionState.CONNECTED:
+                self.logger.warning("Already connected")
+                return True
+
+            try:
+                self.state = ConnectionState.CONNECTING
+                self.logger.info(f"Connecting to {self.url}...")
+
+                # Cancel old tasks before creating new ones
+                if self._heartbeat_task and not self._heartbeat_task.done():
+                    self._heartbeat_task.cancel()
+                if self._receive_task and not self._receive_task.done():
+                    self._receive_task.cancel()
+
+                # Establish WebSocket connection
+                self.connection = await websockets.connect(
+                    self.url,
+                    ping_interval=None,  # We'll handle ping manually
+                    close_timeout=10
+                )
+
+                # Authenticate
+                if not await self._authenticate():
+                    self.logger.error("Authentication failed")
+                    await self.disconnect()
+                    return False
+
+                self.state = ConnectionState.CONNECTED
+                self._reconnect_attempts = 0
+                self.logger.info("✅ Connected successfully")
+
+                # Start background tasks
+                self._receive_task = asyncio.create_task(self._receive_loop())
+                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+                # Call connect callback
+                if self.on_connect_callback:
+                    await self.on_connect_callback()
+
+                return True
+
+            except Exception as e:
+                self.logger.error(f"Connection failed: {e}")
+                self.state = ConnectionState.DISCONNECTED
+
+                if self.on_error_callback:
+                    await self.on_error_callback(e)
+
+                # Auto-reconnect: wait with backoff then loop
+                if not self._should_reconnect:
+                    return False
+
+                self._reconnect_attempts += 1
+                delay = min(
+                    self.reconnect_delay * (2 ** (self._reconnect_attempts - 1)),
+                    self.max_reconnect_delay
+                )
+                self.logger.info(
+                    f"Reconnecting in {delay}s (attempt {self._reconnect_attempts})..."
+                )
+                self.state = ConnectionState.RECONNECTING
+                await asyncio.sleep(delay)
+                # Loop continues to retry
     
     async def disconnect(self):
         """
@@ -351,29 +369,16 @@ class WebSocketClient:
     
     async def _schedule_reconnect(self):
         """
-        Schedule reconnection with exponential backoff
+        Schedule reconnection by resetting state and calling connect().
+        connect() handles backoff internally with an iterative loop.
         """
         if not self._should_reconnect:
             return
-            
-        self.state = ConnectionState.RECONNECTING
-        self._reconnect_attempts += 1
-        
-        # Calculate delay with exponential backoff
-        delay = min(
-            self.reconnect_delay * (2 ** (self._reconnect_attempts - 1)),
-            self.max_reconnect_delay
-        )
-        
-        self.logger.info(
-            f"Reconnecting in {delay}s (attempt {self._reconnect_attempts})..."
-        )
-        
-        await asyncio.sleep(delay)
-        
-        # Try to reconnect
-        if self._should_reconnect:
-            await self.connect()
+
+        self.state = ConnectionState.DISCONNECTED
+        self._is_authenticated = False
+        self.connection = None
+        await self.connect()
     
     def is_connected(self) -> bool:
         """

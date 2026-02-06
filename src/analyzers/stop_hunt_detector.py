@@ -21,7 +21,7 @@ Algorithm:
 
 from typing import Dict, Optional, List, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 
 from ..utils.logger import setup_logger
@@ -173,7 +173,7 @@ class StopHuntDetector:
                 absorption_detected=absorption_detected,
                 absorption_volume=absorption_volume,
                 confidence=confidence,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 liquidation_count=len(liquidations),
                 directional_percentage=directional_pct
             )
@@ -202,7 +202,7 @@ class StopHuntDetector:
         """
         total = 0.0
         for liq in liquidations:
-            vol = liq.get("volume_usd", liq.get("vol", 0))
+            vol = liq.get("vol", 0)
             total += float(vol)
         return total
     
@@ -227,8 +227,8 @@ class StopHuntDetector:
         
         for liq in liquidations:
             side = int(liq.get("side", 0))
-            vol = float(liq.get("volume_usd", liq.get("vol", 0)))
-            
+            vol = float(liq.get("vol", 0))
+
             if side == 1:  # Long liquidation
                 long_liq_count += 1
                 long_liq_volume += vol
@@ -282,8 +282,8 @@ class StopHuntDetector:
             
             for trade in trades:
                 side = int(trade.get("side", 0))
-                vol = float(trade.get("volume_usd", trade.get("vol", 0)))
-                
+                vol = float(trade.get("vol", 0))
+
                 # Only count large orders (>absorption_min_order_usd)
                 if side == target_side and vol > self.absorption_min_order_usd:
                     absorption_volume += vol

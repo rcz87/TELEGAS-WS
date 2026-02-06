@@ -21,7 +21,7 @@ Algorithm:
 
 from typing import Optional, List
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..utils.logger import setup_logger
 
@@ -142,7 +142,7 @@ class SignalGenerator:
                 direction=direction,
                 confidence=merged_confidence,
                 sources=sources,
-                timestamp=datetime.now().isoformat(),
+                timestamp=datetime.now(timezone.utc).isoformat(),
                 metadata=metadata,
                 priority=priority
             )

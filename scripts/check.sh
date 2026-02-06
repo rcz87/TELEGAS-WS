@@ -36,5 +36,5 @@ pm2 logs teleglas-pro --lines 10 --nostream 2>/dev/null || echo "No logs availab
 echo ""
 echo "🌐 Dashboard Access:"
 echo "   Local:  http://localhost:8080"
-echo "   Public: http://31.97.107.243:8080"
+echo "   Public: http://YOUR_VPS_IP:8080"
 echo ""

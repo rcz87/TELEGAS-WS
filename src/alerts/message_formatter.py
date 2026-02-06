@@ -18,7 +18,7 @@ Telegram Markdown:
 """
 
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..utils.logger import setup_logger
 
@@ -119,9 +119,9 @@ class MessageFormatter:
                 target1 = entry_low + (risk * 2)
                 target2 = entry_low + (risk * 3)
             else:
-                # Shorts got stopped, price akan turun → SHORT entry
-                entry_high = price_zone[0]
-                entry_low = price_zone[0] - (zone_spread * 0.1)
+                # Shorts got stopped (LONG_HUNT), price akan turun → SHORT entry near top of zone
+                entry_high = price_zone[1]
+                entry_low = price_zone[1] - (zone_spread * 0.1)
                 sl = price_zone[1] + (zone_spread * 0.3)
                 risk = max(sl - entry_high, 1)
                 target1 = entry_high - (risk * 2)
@@ -159,7 +159,7 @@ Target 1: ${target1:,.0f} ({'+' if is_short_hunt else '-'}{t1_pct:.1f}%) R:R 1:2
 Target 2: ${target2:,.0f} ({'+' if is_short_hunt else '-'}{t2_pct:.1f}%) R:R 1:3{track_line}
 
 🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now().strftime('%H:%M:%S')} UTC"""
+⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
             
             return message
             
@@ -238,7 +238,7 @@ Sell Volume: ${sell_vol/1000:.0f}K ({sell_pct:.0f}%)
 💡 Signal: Strong {'accumulation' if signal.signal_type == 'ACCUMULATION' else 'distribution'}
 
 🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now().strftime('%H:%M:%S')} UTC"""
+⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
             
             return message
             
@@ -279,7 +279,7 @@ Sell Volume: ${sell_vol/1000:.0f}K ({sell_pct:.0f}%)
 💡 {len(events)} event{'s' if len(events) > 1 else ''} detected
 
 🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now().strftime('%H:%M:%S')} UTC"""
+⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
             
             return message
             
@@ -297,7 +297,7 @@ Direction: {signal.direction}
 Sources: {', '.join(signal.sources)}
 
 🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now().strftime('%H:%M:%S')} UTC"""
+⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
     
     def format_error(self, signal: Any) -> str:
         """Format error message"""
