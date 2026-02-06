@@ -201,13 +201,14 @@ async def get_order_flow(symbol: str):
     Returns:
         dict: Order flow data including buy/sell ratios and large orders
     """
-    flow = system_state["order_flow"].get(symbol, {
-        "buy_ratio": 0,
-        "sell_ratio": 0,
-        "large_buys": 0,
-        "large_sells": 0,
-        "last_update": "N/A"
-    })
+    with state_lock:
+        flow = deepcopy(system_state["order_flow"].get(symbol, {
+            "buy_ratio": 0,
+            "sell_ratio": 0,
+            "large_buys": 0,
+            "large_sells": 0,
+            "last_update": "N/A"
+        }))
     return flow
 
 @app.post("/api/coins/add")

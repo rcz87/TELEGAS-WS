@@ -81,7 +81,9 @@ class WebSocketClient:
         # Tasks
         self._receive_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
-        
+        self._consecutive_timeouts = 0
+        self._max_consecutive_timeouts = 3
+
         # Logger
         self.logger = setup_logger("WebSocketClient", "INFO")
         
@@ -272,11 +274,18 @@ class WebSocketClient:
                         self.connection.recv(),
                         timeout=60.0
                     )
+                    self._consecutive_timeouts = 0
                     await self._handle_message(message)
                     
                 except asyncio.TimeoutError:
-                    self.logger.warning("Receive timeout (60s) - connection may be stale")
-                    # Continue loop - heartbeat will detect dead connection
+                    self._consecutive_timeouts += 1
+                    self.logger.warning(
+                        f"Receive timeout (60s) - {self._consecutive_timeouts}/"
+                        f"{self._max_consecutive_timeouts} consecutive"
+                    )
+                    if self._consecutive_timeouts >= self._max_consecutive_timeouts:
+                        self.logger.error("Max consecutive timeouts reached - forcing reconnect")
+                        break
                     continue
                     
                 except websockets.exceptions.ConnectionClosed:
