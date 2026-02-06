@@ -511,7 +511,7 @@ def update_stats(stats: dict):
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.create_task(broadcast_update("stats_update", stats))
-    except:
+    except RuntimeError:
         pass  # No event loop running yet
 
 def update_order_flow(symbol: str, flow_data: dict):
@@ -547,7 +547,7 @@ def update_order_flow(symbol: str, flow_data: dict):
                 "symbol": symbol,
                 **flow_data
             }))
-    except:
+    except RuntimeError:
         pass
 
 def add_signal(signal: dict):
@@ -581,7 +581,7 @@ def add_signal(signal: dict):
         loop = asyncio.get_event_loop()
         if loop.is_running():
             asyncio.create_task(broadcast_update("new_signal", signal_data))
-    except:
+    except RuntimeError:
         pass
 
 def get_monitored_coins() -> List[str]:
