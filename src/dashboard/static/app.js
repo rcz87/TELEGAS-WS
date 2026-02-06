@@ -23,10 +23,29 @@ function dashboard() {
             message: ''
         },
         ws: null,
+        apiToken: '',
+
+        // Auth helper: build headers with token if configured
+        authHeaders(extra = {}) {
+            const headers = {...extra};
+            if (this.apiToken) {
+                headers['Authorization'] = `Bearer ${this.apiToken}`;
+            }
+            return headers;
+        },
+
+        // Auth helper: fetch with auto-auth
+        authFetch(url, options = {}) {
+            options.headers = this.authHeaders(options.headers || {});
+            return fetch(url, options);
+        },
 
         // Initialize
         init() {
             console.log('🚀 Initializing TELEGLAS Dashboard...');
+            // Read token from meta tag or prompt
+            const meta = document.querySelector('meta[name="api-token"]');
+            this.apiToken = meta ? meta.content : '';
             this.loadInitialData();
             this.connectWebSocket();
             this.startPeriodicRefresh();
@@ -35,8 +54,11 @@ function dashboard() {
         // WebSocket Connection
         connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${protocol}//${window.location.host}/ws`;
-            
+            let wsUrl = `${protocol}//${window.location.host}/ws`;
+            if (this.apiToken) {
+                wsUrl += `?token=${this.apiToken}`;
+            }
+
             console.log('Connecting to WebSocket:', wsUrl);
             this.ws = new WebSocket(wsUrl);
             
@@ -105,9 +127,9 @@ function dashboard() {
         async loadInitialData() {
             try {
                 const [statsRes, coinsRes, signalsRes] = await Promise.all([
-                    fetch('/api/stats'),
-                    fetch('/api/coins'),
-                    fetch('/api/signals')
+                    this.authFetch('/api/stats'),
+                    this.authFetch('/api/coins'),
+                    this.authFetch('/api/signals')
                 ]);
                 
                 this.stats = await statsRes.json();
@@ -142,7 +164,7 @@ function dashboard() {
             const symbol = this.newCoin.toUpperCase().trim();
             
             try {
-                const response = await fetch('/api/coins/add', {
+                const response = await this.authFetch('/api/coins/add', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({symbol: symbol})
@@ -163,7 +185,7 @@ function dashboard() {
 
         async toggleCoin(symbol, active) {
             try {
-                await fetch(`/api/coins/${symbol}/toggle`, {
+                await this.authFetch(`/api/coins/${symbol}/toggle`, {
                     method: 'PATCH',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({active: active})
@@ -180,7 +202,7 @@ function dashboard() {
             if (!confirm(`Remove ${symbol} from monitoring?`)) return;
             
             try {
-                await fetch(`/api/coins/remove/${symbol}`, {
+                await this.authFetch(`/api/coins/remove/${symbol}`, {
                     method: 'DELETE'
                 });
                 

@@ -308,6 +308,8 @@ class SignalGenerator:
         if order_flow_signal:
             metadata['order_flow'] = {
                 'buy_ratio': order_flow_signal.buy_ratio,
+                'buy_volume': order_flow_signal.buy_volume,
+                'sell_volume': order_flow_signal.sell_volume,
                 'large_buys': order_flow_signal.large_buys,
                 'large_sells': order_flow_signal.large_sells,
                 'net_delta': order_flow_signal.net_delta,

@@ -48,15 +48,18 @@ class EventPatternDetector:
     - Multiple pattern types
     """
     
-    def __init__(self, buffer_manager, monitoring_config: dict = None):
+    def __init__(self, buffer_manager, monitoring_config: dict = None,
+                 large_order_threshold: float = 10_000):
         """
         Initialize event pattern detector
 
         Args:
             buffer_manager: BufferManager instance
             monitoring_config: Dynamic monitoring config with per-tier thresholds
+            large_order_threshold: Min volume for whale order detection (default $10K)
         """
         self.buffer_manager = buffer_manager
+        self.large_order_threshold = large_order_threshold
         self.logger = setup_logger("EventPatternDetector", "INFO")
         self._detections = 0
 
@@ -175,7 +178,7 @@ class EventPatternDetector:
                 vol = float(trade.get("volume_usd", trade.get("vol", 0)))
                 side = int(trade.get("side", 0))
                 
-                if vol > 10000:  # $10K+
+                if vol >= self.large_order_threshold:
                     if side == 2:  # Buy
                         large_buys += 1
                     elif side == 1:  # Sell
