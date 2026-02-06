@@ -56,28 +56,47 @@ class OrderFlowAnalyzer:
     """
     
     def __init__(
-        self, 
-        buffer_manager, 
+        self,
+        buffer_manager,
         large_order_threshold: float = 10000,
         accumulation_ratio: float = 0.65,
-        distribution_ratio: float = 0.35
+        distribution_ratio: float = 0.35,
+        monitoring_config: dict = None
     ):
         """
         Initialize order flow analyzer
-        
+
         Args:
             buffer_manager: BufferManager instance
             large_order_threshold: Min volume for large order (default $10K)
             accumulation_ratio: Buy ratio threshold for accumulation (default 0.65)
             distribution_ratio: Buy ratio threshold for distribution (default 0.35)
+            monitoring_config: Dynamic monitoring config with per-tier thresholds
         """
         self.buffer_manager = buffer_manager
         self.large_order_threshold = large_order_threshold
         self.accumulation_ratio = accumulation_ratio
         self.distribution_ratio = distribution_ratio
-        
+
+        # Tiered volume thresholds for fair confidence scoring across coin sizes
+        monitoring = monitoring_config or {}
+        self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
+        self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
+        self._tier1_cascade = monitoring.get('tier1_cascade', 2_000_000)
+        self._tier2_cascade = monitoring.get('tier2_cascade', 200_000)
+        self._tier3_cascade = monitoring.get('tier3_cascade', 50_000)
+
         self.logger = setup_logger("OrderFlowAnalyzer", "INFO")
         self._detections = 0
+
+    def get_volume_threshold(self, symbol: str) -> float:
+        """Get volume threshold for tier-aware confidence scoring."""
+        if symbol in self._tier1_symbols:
+            return self._tier1_cascade
+        elif symbol in self._tier2_symbols:
+            return self._tier2_cascade
+        else:
+            return self._tier3_cascade
         
     async def analyze(self, symbol: str, time_window: int = 300) -> Optional[OrderFlowSignal]:
         """
@@ -123,13 +142,14 @@ class OrderFlowAnalyzer:
             if not signal_type:
                 return None  # No clear signal
             
-            # Step 5: Calculate confidence
+            # Step 5: Calculate confidence (tier-aware)
             confidence = self.calculate_confidence(
                 buy_ratio=buy_ratio,
                 large_buys=large_buys,
                 large_sells=large_sells,
                 total_volume=total_volume,
-                total_trades=len(trades)
+                total_trades=len(trades),
+                symbol=symbol
             )
             
             # Calculate net delta
@@ -251,31 +271,30 @@ class OrderFlowAnalyzer:
         large_buys: int,
         large_sells: int,
         total_volume: float,
-        total_trades: int
+        total_trades: int,
+        symbol: str = ""
     ) -> float:
         """
-        Calculate confidence score (0-99%)
-        
+        Calculate confidence score (0-99%) with tier-aware volume scoring.
+
         Factors:
         - Ratio clarity (extreme = more confident)
         - Large order count (more whales = more confident)
-        - Total volume (higher = more significant)
+        - Volume ratio relative to coin's tier threshold (fair across all coins)
         - Trade count (more = more reliable)
-        
+
         Args:
             buy_ratio: Buy volume ratio
             large_buys: Large buy order count
             large_sells: Large sell order count
             total_volume: Total volume
             total_trades: Total trade count
-            
-        Returns:
-            Confidence score (0-99%)
+            symbol: Trading pair for tier-aware thresholds
         """
         confidence = 50.0  # Base
-        
+
         # Factor 1: Ratio clarity
-        if buy_ratio > 0.8 or buy_ratio < 0.2:  # Very one-sided
+        if buy_ratio > 0.8 or buy_ratio < 0.2:
             confidence += 20
         elif buy_ratio > 0.75 or buy_ratio < 0.25:
             confidence += 15
@@ -283,11 +302,10 @@ class OrderFlowAnalyzer:
             confidence += 10
         elif buy_ratio > 0.65 or buy_ratio < 0.35:
             confidence += 5
-        
+
         # Factor 2: Large order count
-        total_large_orders = large_buys + large_sells
         dominant_large_orders = max(large_buys, large_sells)
-        
+
         if dominant_large_orders >= 10:
             confidence += 20
         elif dominant_large_orders >= 7:
@@ -296,22 +314,25 @@ class OrderFlowAnalyzer:
             confidence += 10
         elif dominant_large_orders >= 3:
             confidence += 5
-        
-        # Factor 3: Total volume
-        if total_volume > 10_000_000:  # $10M+
+
+        # Factor 3: Volume relative to tier threshold (fair for all coin sizes)
+        threshold = self.get_volume_threshold(symbol) if symbol else 2_000_000
+        volume_ratio = total_volume / max(threshold, 1)
+
+        if volume_ratio > 5.0:
             confidence += 15
-        elif total_volume > 5_000_000:  # $5M+
+        elif volume_ratio > 2.5:
             confidence += 10
-        elif total_volume > 2_000_000:  # $2M+
+        elif volume_ratio > 1.0:
             confidence += 5
-        
+
         # Factor 4: Trade count
         if total_trades > 100:
             confidence += 5
         elif total_trades > 50:
             confidence += 3
-        
-        return min(confidence, 99.0)  # Cap at 99%
+
+        return min(confidence, 99.0)
     
     def get_stats(self) -> dict:
         """Get analyzer statistics"""

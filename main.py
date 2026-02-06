@@ -103,7 +103,8 @@ class TeleglasPro:
         )
         self.order_flow_analyzer = OrderFlowAnalyzer(
             self.buffer_manager,
-            large_order_threshold=thresholds.get('large_order_threshold', 10_000)
+            large_order_threshold=thresholds.get('large_order_threshold', 10_000),
+            monitoring_config=monitoring_config
         )
         self.event_detector = EventPatternDetector(
             self.buffer_manager,
@@ -115,7 +116,8 @@ class TeleglasPro:
             min_confidence=signals_config.get('min_confidence', 65.0)
         )
         self.confidence_scorer = ConfidenceScorer(
-            learning_rate=0.1
+            learning_rate=0.1,
+            monitoring_config=monitoring_config
         )
         # CRITICAL FIX Bug #6: Load cooldown from config (was hardcoded)
         self.signal_validator = SignalValidator(
@@ -525,7 +527,8 @@ class TeleglasPro:
                 adjusted_confidence = self.confidence_scorer.adjust_confidence(
                     trading_signal.confidence,
                     trading_signal.signal_type,
-                    trading_signal.metadata
+                    trading_signal.metadata,
+                    symbol=symbol
                 )
                 trading_signal.confidence = adjusted_confidence
 

@@ -133,9 +133,16 @@ class ToggleCoinRequest(BaseModel):
 
 @app.get("/")
 async def root():
-    """Serve dashboard HTML"""
+    """Serve dashboard HTML with auth token injected."""
     html_file = Path(__file__).parent / "static" / "index.html"
     if html_file.exists():
+        if API_TOKEN:
+            # Inject token as meta tag so frontend can authenticate
+            from fastapi.responses import HTMLResponse
+            html_content = html_file.read_text()
+            token_meta = f'<meta name="api-token" content="{API_TOKEN}">'
+            html_content = html_content.replace('</head>', f'    {token_meta}\n</head>', 1)
+            return HTMLResponse(content=html_content)
         return FileResponse(str(html_file))
     return {"message": "Dashboard HTML not found. Please create src/dashboard/static/index.html"}
 
@@ -293,7 +300,8 @@ async def remove_coin(symbol: str, _auth=Depends(verify_token), _rl=Depends(chec
     return {"success": True, "symbol": symbol}
 
 @app.patch("/api/coins/{symbol}/toggle")
-async def toggle_coin(symbol: str, request: ToggleCoinRequest):
+async def toggle_coin(symbol: str, request: ToggleCoinRequest,
+                      _auth=Depends(verify_token), _rl=Depends(check_rate_limit)):
     """
     Enable/disable alerts for a coin
     

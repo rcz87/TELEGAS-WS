@@ -210,23 +210,23 @@ Target 2: ${target2:,.0f} (+{t2_pct:.1f}%) R:R 1:3{track_line}
             buy_pct = buy_ratio * 100
             sell_pct = (1 - buy_ratio) * 100
             
-            # Calculate volumes
+            # Get actual buy/sell volumes
+            buy_vol = metadata.get('buy_volume', 0)
+            sell_vol = metadata.get('sell_volume', 0)
             net_delta = metadata.get('net_delta', 0)
-            buy_vol = net_delta if net_delta > 0 else 0
-            sell_vol = -net_delta if net_delta < 0 else 0
-            
+
             # Progress bars
             buy_bar = self.create_progress_bar(buy_pct, 20)
             sell_bar = self.create_progress_bar(sell_pct, 20)
-            
+
             message = f"""{type_emoji} *{signal.symbol}* - {signal_desc}
 
 📈 *5min Analysis*
 
-Buy Volume: ${abs(net_delta)/1000:.0f}K ({buy_pct:.0f}%)
+Buy Volume: ${buy_vol/1000:.0f}K ({buy_pct:.0f}%)
 {buy_bar}
 
-Sell Volume: ${abs(net_delta)/1000:.0f}K ({sell_pct:.0f}%)
+Sell Volume: ${sell_vol/1000:.0f}K ({sell_pct:.0f}%)
 {sell_bar}
 
 🐋 *Whale Activity*
