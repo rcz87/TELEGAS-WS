@@ -135,6 +135,35 @@ dashboard:
 
 ---
 
+## Security Features
+
+### Authentication & Authorization
+- **Bearer Token Auth** - Protects all write operations (POST, DELETE, PATCH)
+- **First-Message WebSocket Auth** - Token sent after connect, not in URL (avoids log exposure)
+- **CORS Policy** - Restricted to specific origins
+- **Rate Limiting** - 30 requests per minute per IP address
+- **Input Validation** - Regex validation + sanitization on all inputs
+- **Thread-Safe** - Lock-protected shared state access
+- **Token Placeholder Detection** - Warns if default token not changed
+
+### Security Configuration
+
+**1. Generate Secure API Token:**
+```bash
+openssl rand -hex 32
+```
+
+**2. Update `config/config.yaml`:**
+```yaml
+dashboard:
+  api_token: "your_generated_token_here"
+  cors_origins:
+    - "http://localhost:8080"
+    - "http://your_vps_ip:8080"
+```
+
+---
+
 ## Project Structure
 
 ```
