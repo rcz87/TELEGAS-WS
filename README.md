@@ -377,7 +377,7 @@ python scripts/test_alerts.py
 
 ## Engineering Review Log
 
-### v4.0 (Current) - 60+ bug fixes across 7 review sessions
+### v4.0 (Current) - 65+ bug fixes across 8 review sessions
 
 **Session 1** - Initial security review (8 fixes)
 - Input sanitization, rate limiting, auth on all endpoints
@@ -436,13 +436,20 @@ python scripts/test_alerts.py
 - P2: Atomic transactions + connection guard in database.py
 - P2: Consistent `vol` field name across all analyzers (was mixed `volume_usd`/`vol`)
 
+**Session 8** - Final remaining bugs (5 fixes)
+- P0: Fixed `signal_tracker.get_overall_stats()` → `get_stats()` (wrong method name crashed stats_reporter every 30s, dashboard never received updated statistics)
+- P1: Added thread-safe locking to all buffer_manager read methods (`get_liquidations`, `get_trades`, `get_all_*`, `cleanup_old_data`) — prevented `RuntimeError: deque mutated during iteration` under concurrent load
+- P2: Fixed unreliable periodic logging (`int(uptime) % 300 == 0` → elapsed-time tracking so 5-minute detailed log actually fires)
+- P2: Added `close()` method to telegram_bot for aiohttp session cleanup on shutdown (prevented resource leak warning)
+- P2: Fixed test_signals.py `MockOrderFlowSignal` missing `buy_volume`/`sell_volume` attributes (integration test was silently failing)
+
 ---
 
 ## Status
 
 **Current Version:** 4.0.0
 **Status:** Production Ready
-**Last Updated:** February 6, 2026
+**Last Updated:** February 7, 2026
 
 ---
 
