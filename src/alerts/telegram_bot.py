@@ -189,11 +189,18 @@ class TelegramBot:
                 self.logger.debug(f"Rate limit: waiting {wait_time:.1f}s")
                 await asyncio.sleep(wait_time)
     
+    async def close(self):
+        """Close aiohttp session to prevent resource leak."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+            self.logger.debug("HTTP session closed")
+
     def get_stats(self) -> dict:
         """Get bot statistics"""
         total = self._messages_sent + self._messages_failed
         success_rate = (self._messages_sent / max(total, 1)) * 100
-        
+
         return {
             "messages_sent": self._messages_sent,
             "messages_failed": self._messages_failed,

@@ -48,6 +48,8 @@ class MockOrderFlowSignal:
     symbol: str
     signal_type: str
     buy_ratio: float
+    buy_volume: float
+    sell_volume: float
     large_buys: int
     large_sells: int
     net_delta: float
@@ -80,6 +82,8 @@ def create_mock_order_flow(symbol: str = "BTCUSDT", conf: float = 75.0):
         symbol=symbol,
         signal_type="ACCUMULATION",
         buy_ratio=0.72,
+        buy_volume=216000,
+        sell_volume=84000,
         large_buys=15,
         large_sells=5,
         net_delta=150000,

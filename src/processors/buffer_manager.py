@@ -150,31 +150,33 @@ class BufferManager:
         Returns:
             List of liquidation events within time window (limited by max_count)
         """
-        if symbol not in self.liquidation_buffers:
-            return []
-        
         try:
             # Calculate cutoff time (milliseconds)
             cutoff_time = int((time.time() - time_window) * 1000)
-            
-            # Filter events within time window
-            buffer = self.liquidation_buffers[symbol]
+
+            # Thread-safe read: snapshot buffer under lock
+            with self._lock:
+                if symbol not in self.liquidation_buffers:
+                    return []
+                buffer_snapshot = list(self.liquidation_buffers[symbol])
+
+            # Filter events within time window (outside lock for performance)
             recent_events = [
-                event for event in buffer
+                event for event in buffer_snapshot
                 if event.get("timestamp", 0) >= cutoff_time
             ]
-            
+
             # CRITICAL FIX: Limit results to max_count (most recent first)
             if max_count is not None and len(recent_events) > max_count:
                 recent_events = recent_events[-max_count:]
-            
+
             self.logger.debug(
                 f"Retrieved {len(recent_events)} liquidations for {symbol} "
                 f"in last {time_window}s"
             )
-            
+
             return recent_events
-            
+
         except Exception as e:
             self.logger.error(f"Failed to get liquidations: {e}")
             return []
@@ -193,31 +195,33 @@ class BufferManager:
         Returns:
             List of trade events within time window (limited by max_count)
         """
-        if symbol not in self.trade_buffers:
-            return []
-        
         try:
             # Calculate cutoff time (milliseconds)
             cutoff_time = int((time.time() - time_window) * 1000)
-            
-            # Filter events within time window
-            buffer = self.trade_buffers[symbol]
+
+            # Thread-safe read: snapshot buffer under lock
+            with self._lock:
+                if symbol not in self.trade_buffers:
+                    return []
+                buffer_snapshot = list(self.trade_buffers[symbol])
+
+            # Filter events within time window (outside lock for performance)
             recent_events = [
-                event for event in buffer
+                event for event in buffer_snapshot
                 if event.get("timestamp", 0) >= cutoff_time
             ]
-            
+
             # CRITICAL FIX: Limit results to max_count (most recent first)
             if max_count is not None and len(recent_events) > max_count:
                 recent_events = recent_events[-max_count:]
-            
+
             self.logger.debug(
                 f"Retrieved {len(recent_events)} trades for {symbol} "
                 f"in last {time_window}s"
             )
-            
+
             return recent_events
-            
+
         except Exception as e:
             self.logger.error(f"Failed to get trades: {e}")
             return []
@@ -232,10 +236,10 @@ class BufferManager:
         Returns:
             List of all liquidation events in buffer
         """
-        if symbol not in self.liquidation_buffers:
-            return []
-        
-        return list(self.liquidation_buffers[symbol])
+        with self._lock:
+            if symbol not in self.liquidation_buffers:
+                return []
+            return list(self.liquidation_buffers[symbol])
     
     def get_all_trades(self, symbol: str) -> List[dict]:
         """
@@ -247,10 +251,10 @@ class BufferManager:
         Returns:
             List of all trade events in buffer
         """
-        if symbol not in self.trade_buffers:
-            return []
-        
-        return list(self.trade_buffers[symbol])
+        with self._lock:
+            if symbol not in self.trade_buffers:
+                return []
+            return list(self.trade_buffers[symbol])
     
     def cleanup_old_data(self, max_age_seconds: int = 3600):
         """
@@ -262,39 +266,40 @@ class BufferManager:
         try:
             cutoff_time = int((time.time() - max_age_seconds) * 1000)
             cleaned_count = 0
-            
-            # Cleanup liquidation buffers
-            for symbol, buffer in self.liquidation_buffers.items():
-                original_size = len(buffer)
-                
-                # Create new deque with only recent events
-                recent_events = deque(
-                    (event for event in buffer if event.get("timestamp", 0) >= cutoff_time),
-                    maxlen=self.max_liquidations
-                )
-                
-                self.liquidation_buffers[symbol] = recent_events
-                cleaned_count += original_size - len(recent_events)
-            
-            # Cleanup trade buffers
-            for symbol, buffer in self.trade_buffers.items():
-                original_size = len(buffer)
-                
-                # Create new deque with only recent events
-                recent_events = deque(
-                    (event for event in buffer if event.get("timestamp", 0) >= cutoff_time),
-                    maxlen=self.max_trades
-                )
-                
-                self.trade_buffers[symbol] = recent_events
-                cleaned_count += original_size - len(recent_events)
-            
+
+            with self._lock:
+                # Cleanup liquidation buffers
+                for symbol, buffer in self.liquidation_buffers.items():
+                    original_size = len(buffer)
+
+                    # Create new deque with only recent events
+                    recent_events = deque(
+                        (event for event in buffer if event.get("timestamp", 0) >= cutoff_time),
+                        maxlen=self.max_liquidations
+                    )
+
+                    self.liquidation_buffers[symbol] = recent_events
+                    cleaned_count += original_size - len(recent_events)
+
+                # Cleanup trade buffers
+                for symbol, buffer in self.trade_buffers.items():
+                    original_size = len(buffer)
+
+                    # Create new deque with only recent events
+                    recent_events = deque(
+                        (event for event in buffer if event.get("timestamp", 0) >= cutoff_time),
+                        maxlen=self.max_trades
+                    )
+
+                    self.trade_buffers[symbol] = recent_events
+                    cleaned_count += original_size - len(recent_events)
+
             if cleaned_count > 0:
                 self.logger.info(
                     f"Cleaned up {cleaned_count} old events "
                     f"(older than {max_age_seconds}s)"
                 )
-            
+
         except Exception as e:
             self.logger.error(f"Cleanup failed: {e}")
     
