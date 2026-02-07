@@ -629,9 +629,10 @@ class TeleglasPro:
     
     async def stats_reporter(self):
         """Background task: report statistics every 5 minutes"""
+        last_log_time = 0
         while not shutdown_event.is_set():
             await asyncio.sleep(30)  # Every 30 seconds for dashboard
-            
+
             # Update uptime
             uptime = (datetime.now() - self.start_time).total_seconds()
             self.stats['uptime_seconds'] = int(uptime)
@@ -643,14 +644,14 @@ class TeleglasPro:
                 'events': self.event_detector.get_stats(),
                 'validator': self.signal_validator.get_stats(),
                 'confidence': self.confidence_scorer.get_overall_stats(),
-                'tracker': self.signal_tracker.get_overall_stats(),
+                'tracker': self.signal_tracker.get_stats(),
             }
 
             # Update dashboard
             dashboard_api.update_stats(self.stats)
-            
-            # Log every 5 minutes
-            if int(uptime) % 300 == 0:
+
+            # Log every 5 minutes (use elapsed time since last log)
+            if uptime - last_log_time >= 300:
                 self.logger.info("📊 Statistics Report:")
                 self.logger.info(f"   Messages: {self.stats['messages_received']} received, {self.stats['messages_processed']} processed")
                 self.logger.info(f"   Liquidations: {self.stats['liquidations_processed']}, Trades: {self.stats['trades_processed']}")
@@ -658,6 +659,7 @@ class TeleglasPro:
                 self.logger.info(f"   Alerts: {self.stats['alerts_sent']} sent")
                 self.logger.info(f"   Errors: {self.stats['errors']}")
                 self.logger.info(f"   Coins tracked: {len(self.buffer_manager.get_tracked_symbols())} (discovered: {len(self.discovered_symbols)})")
+                last_log_time = uptime
     
     async def signal_tracker_task(self):
         """Background task: check signal outcomes every 60 seconds"""
@@ -847,6 +849,10 @@ class TeleglasPro:
                 task.cancel()
 
             await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Close Telegram bot session
+            if self.telegram_bot:
+                await self.telegram_bot.close()
 
             # Save state to database before exit
             await self._save_state()
