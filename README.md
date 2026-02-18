@@ -14,6 +14,7 @@
 - **Stop Hunt Detection** - Identify liquidation cascades in real-time with tier-aware thresholds
 - **Order Flow Analysis** - Track whale accumulation and distribution patterns
 - **Event Pattern Detection** - Volume spikes, whale accumulation & distribution windows
+- **Market Context Filter** - OI + Funding Rate from CoinGlass REST API v4 filters false signals
 - **LONG + SHORT Signals** - Both directions fully supported across entire pipeline
 - **Adaptive Confidence Scoring** - Learns from signal outcomes, tier-aware quality boost
 - **Anti-Spam System** - Dedup (5% confidence bands), cooldown, rate limiting
@@ -35,11 +36,14 @@
 ### Persistent Storage (SQLite)
 - **Signal History** - All generated signals saved with outcome tracking
 - **Auto WIN/LOSS** - SignalTracker evaluates after 15min, requires >= 50% to target for WIN
+- **OI & Funding Snapshots** - Historical OI and funding rate data persisted (7-day retention)
 - **State Restore** - Confidence state, dashboard coins, baselines survive restart
 - **CSV Export** - `/api/export/signals.csv`, `/api/export/baselines.csv`
 
 ### Alert System
 - **Telegram Integration** - Professional formatting with LONG/SHORT labels and correct +/- targets
+- **Market Context in Messages** - OI/funding alignment shown on every Telegram alert
+- **Smart Price Formatting** - Works across all price scales (BTC $96,200 to PEPE $0.00001182)
 - **Priority Queue** - Urgent/watch/info classification with retry logic
 - **Rate Limiting** - Configurable max signals per hour + per-symbol cooldown
 
@@ -54,29 +58,33 @@
 ## Architecture
 
 ```
-CoinGlass WebSocket API
-  |
-  |  liquidationOrders (ALL coins) + futures_trades@{symbol}
-  v
+CoinGlass WebSocket API                    CoinGlass REST API v4
+  |                                              |
+  |  liquidationOrders (ALL coins)               |  OI aggregated-history
+  |  futures_trades@all_{symbol}@10000           |  Funding rate oi-weight-history
+  v                                              v
 +---------------------------------------------------------+
 |  TELEGLAS Pro Pipeline                                   |
 |                                                          |
-|  1. WebSocket Client     - Auto-reconnect, heartbeat    |
-|  2. Data Validator       - Schema validation (str types) |
-|  3. Buffer Manager       - Rolling time-series per coin  |
-|  4. Analyzers            - StopHunt, OrderFlow, Events  |
-|  5. Signal Generator     - Merge + direction + metadata  |
-|  6. Signal Validator     - Dedup, cooldown, rate limit   |
-|  7. Confidence Scorer    - Tier-aware adaptive scoring   |
+|  1. WebSocket Client     - Auth via URL query param      |
+|  2. Field Normalizer     - volUsd→vol, exName→exchange   |
+|  3. Data Validator       - Schema validation (str types) |
+|  4. Buffer Manager       - Rolling time-series per coin  |
+|  5. Analyzers            - StopHunt, OrderFlow, Events  |
+|  6. Signal Generator     - Merge + direction + metadata  |
+|  7. Signal Validator     - Dedup, cooldown, rate limit   |
+|  8. Confidence Scorer    - Tier-aware adaptive scoring   |
+|  9. Market Context Filter - OI/Funding alignment check   |
 |                                                          |
-|  Storage: SQLite (signals, state, baselines)             |
+|  REST Poller: 5-min polling for OI + funding rate        |
+|  Storage: SQLite (signals, state, baselines, OI/funding) |
 +-----------+-------------------------------+--------------+
             |                               |
             v                               v
      +-----------+                 +------------------+
      | Telegram  |                 | Web Dashboard    |
      | - Alerts  |                 | - localhost:8080 |
-     | - Signals |                 | - REST + WS API  |
+     | - Context |                 | - REST + WS API  |
      +-----------+                 +------------------+
 ```
 
@@ -128,6 +136,13 @@ monitoring:
   tier1_cascade: 2000000        # $2M for BTC, ETH
   tier2_cascade: 200000         # $200K for mid-caps
   tier3_cascade: 50000          # $50K for small coins
+
+market_context:
+  enabled: true
+  poll_interval: 300            # 5 minutes between REST API polls
+  max_snapshots: 72             # 6 hours buffer at 5-min intervals
+  filter_mode: "normal"         # "strict" | "normal" | "permissive"
+  confidence_adjust: true       # +5 FAVORABLE, -10 UNFAVORABLE
 
 dashboard:
   api_token: "SET_A_REAL_TOKEN_HERE"  # Required for auth
@@ -198,11 +213,13 @@ TELEGLAS-WS/
 │
 ├── src/
 │   ├── connection/
-│   │   └── websocket_client.py   # CoinGlass WebSocket + auto-reconnect
+│   │   ├── websocket_client.py   # CoinGlass WebSocket (auth via URL query param)
+│   │   └── rest_poller.py        # CoinGlass REST API v4 (OI + funding rate)
 │   │
 │   ├── processors/
 │   │   ├── data_validator.py     # Schema validation (accepts string numerics)
-│   │   └── buffer_manager.py     # Rolling time-series buffers per symbol
+│   │   ├── buffer_manager.py     # Rolling time-series buffers per symbol
+│   │   └── market_context_buffer.py  # OI/funding buffer + context assessment
 │   │
 │   ├── analyzers/
 │   │   ├── stop_hunt_detector.py # Liquidation cascade → LONG/SHORT
@@ -213,11 +230,12 @@ TELEGLAS-WS/
 │   │   ├── signal_generator.py   # Merge analyzers → TradingSignal
 │   │   ├── signal_validator.py   # Anti-spam, dedup, cooldown
 │   │   ├── signal_tracker.py     # Auto WIN/LOSS after 15min
-│   │   └── confidence_scorer.py  # Adaptive confidence with tier scaling
+│   │   ├── confidence_scorer.py  # Adaptive confidence with tier scaling
+│   │   └── market_context_filter.py  # OI/funding signal filter
 │   │
 │   ├── alerts/
 │   │   ├── telegram_bot.py       # Telegram sender
-│   │   ├── message_formatter.py  # LONG/SHORT message templates
+│   │   ├── message_formatter.py  # Smart price formatting, market context
 │   │   └── alert_queue.py        # Priority queue with retry
 │   │
 │   ├── dashboard/
@@ -228,7 +246,7 @@ TELEGLAS-WS/
 │   │       └── manifest.json
 │   │
 │   ├── storage/
-│   │   └── database.py           # SQLite async (signals, state, baselines)
+│   │   └── database.py           # SQLite async (signals, state, baselines, OI/funding)
 │   │
 │   └── utils/
 │       ├── logger.py
@@ -373,11 +391,25 @@ python scripts/test_alerts.py
 | **WHALE_DISTRIBUTION** | SHORT | 5+ large sell orders in 5 minutes | Sell ratio weighted |
 | **VOLUME_SPIKE** | - | 3x+ normal volume in 1 minute | Spike ratio scaled |
 
+### Market Context Filter
+
+All signals pass through the market context filter before reaching Telegram:
+
+| Assessment | Action | Confidence Adj | Condition |
+|------------|--------|---------------|-----------|
+| **FAVORABLE** | Pass | +5 | Funding opposes crowded side + OI confirming |
+| **NEUTRAL** | Pass | 0 to +2 | Insufficient signal or mixed indicators |
+| **UNFAVORABLE** | Block Telegram | -10 | Funding shows same-side crowding |
+
+Filter modes: `strict` (only FAVORABLE passes), `normal` (block UNFAVORABLE), `permissive` (pass all, adjust confidence only)
+
+Blocked signals still appear on the web dashboard — only Telegram delivery is filtered.
+
 ---
 
 ## Engineering Review Log
 
-### v4.0 (Current) - 65+ bug fixes across 8 review sessions
+### v4.1 (Current) - Market Context Filter + 70+ fixes across 9 sessions
 
 **Session 1** - Initial security review (8 fixes)
 - Input sanitization, rate limiting, auth on all endpoints
@@ -443,13 +475,27 @@ python scripts/test_alerts.py
 - P2: Added `close()` method to telegram_bot for aiohttp session cleanup on shutdown (prevented resource leak warning)
 - P2: Fixed test_signals.py `MockOrderFlowSignal` missing `buy_volume`/`sell_volume` attributes (integration test was silently failing)
 
+**Session 9** - Market Context Filter + CoinGlass API alignment
+- Feature: Added OI + Funding Rate market context filter (3 new modules: `rest_poller.py`, `market_context_buffer.py`, `market_context_filter.py`)
+- Feature: CoinGlass REST API v4 poller — polls OI aggregated-history and funding rate oi-weight-history every 5 minutes (OHLC candle format)
+- Feature: Market context assessment (FAVORABLE/NEUTRAL/UNFAVORABLE) with confidence adjustment (+5/-10)
+- Feature: Three filter modes (strict/normal/permissive) configurable via `config.yaml`
+- Feature: Market context section in all Telegram messages (funding rate + OI alignment indicators)
+- Feature: Smart price formatting — works from BTC ($96,200) to PEPE ($0.00001182)
+- P0: Fixed WebSocket auth — API key now via URL query param `?cg-api-key=` per CoinGlass docs (was using non-existent login event)
+- P0: Fixed field name mismatch — CoinGlass sends `volUsd`/`exName` but code expected `vol`/`exchange` (all analysis silently returned zero volumes). Added normalization at ingestion
+- P1: Changed trade subscription minVol from `@0` to `@10000` to filter noise (only trades >= $10K)
+- P1: Fixed price formatting for small coins — `$0.00001220` was displayed as `$0` (hardcoded `:,.0f` format)
+- P1: Fixed `risk = max(..., 1)` hardcode that broke trading setup calculation for coins < $1
+- DB: Added `oi_snapshots` and `funding_snapshots` tables with auto-cleanup (7-day retention)
+
 ---
 
 ## Status
 
-**Current Version:** 4.0.0
+**Current Version:** 4.1.0
 **Status:** Production Ready
-**Last Updated:** February 7, 2026
+**Last Updated:** February 18, 2026
 
 ---
 
