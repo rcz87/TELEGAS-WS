@@ -306,31 +306,24 @@ class DataValidator:
     
     def is_reasonable_price(self, symbol: str, price: float) -> Tuple[bool, str]:
         """
-        Check if price is reasonable for given symbol
-        
+        Check if price is reasonable for given symbol.
+
+        Only rejects obviously invalid values (negative, zero).
+        Does NOT enforce symbol-specific ranges as crypto prices are volatile.
+
         Args:
             symbol: Trading symbol
             price: Price value
-            
+
         Returns:
             (is_reasonable, reason)
         """
-        # Basic checks
         if price <= 0:
             return False, "Price must be positive"
-        
-        if price > 1_000_000:
-            return False, f"Price too high: ${price:,.2f}"
-        
-        # Symbol-specific checks (rough estimates)
-        if "BTC" in symbol:
-            if price < 10_000 or price > 200_000:
-                return False, f"BTC price out of range: ${price:,.2f}"
-        
-        elif "ETH" in symbol:
-            if price < 500 or price > 10_000:
-                return False, f"ETH price out of range: ${price:,.2f}"
-        
+
+        if price > 10_000_000:  # $10M per coin - clearly invalid
+            return False, f"Price suspiciously high: ${price:,.2f}"
+
         return True, "OK"
     
     def get_stats(self) -> dict:

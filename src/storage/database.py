@@ -18,6 +18,7 @@ import csv
 import io
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -135,6 +136,7 @@ class Database:
     async def update_signal_outcome(self, signal_id: int, outcome: str,
                                      exit_price: float, pnl_pct: float):
         """Update signal with outcome after checking."""
+        self._ensure_connected()
         await self._db.execute(
             """UPDATE signals
                SET outcome = ?, exit_price = ?, pnl_pct = ?, checked_at = ?
@@ -145,6 +147,8 @@ class Database:
 
     async def get_recent_signals(self, limit: int = 100) -> List[dict]:
         """Get most recent signals."""
+        self._ensure_connected()
+        limit = min(max(limit, 1), 5000)  # Clamp to 1-5000
         cursor = await self._db.execute(
             "SELECT * FROM signals ORDER BY created_at DESC LIMIT ?",
             (limit,)
@@ -154,6 +158,8 @@ class Database:
 
     async def get_signals_by_symbol(self, symbol: str, limit: int = 50) -> List[dict]:
         """Get signals for a specific symbol."""
+        self._ensure_connected()
+        limit = min(max(limit, 1), 5000)
         cursor = await self._db.execute(
             "SELECT * FROM signals WHERE symbol = ? ORDER BY created_at DESC LIMIT ?",
             (symbol, limit)
@@ -163,6 +169,7 @@ class Database:
 
     async def get_signal_stats(self) -> dict:
         """Get aggregate signal statistics."""
+        self._ensure_connected()
         cursor = await self._db.execute("""
             SELECT
                 COUNT(*) as total,
@@ -180,6 +187,7 @@ class Database:
 
     async def get_signal_stats_by_type(self) -> Dict[str, dict]:
         """Get signal stats grouped by type."""
+        self._ensure_connected()
         cursor = await self._db.execute("""
             SELECT
                 signal_type,
@@ -200,6 +208,7 @@ class Database:
     async def save_confidence_state(self, signal_type: str, win_rate: float,
                                      history: list):
         """Save confidence scorer state for a signal type."""
+        self._ensure_connected()
         await self._db.execute(
             """INSERT OR REPLACE INTO confidence_state
                (signal_type, win_rate, history_json, updated_at)
@@ -210,6 +219,7 @@ class Database:
 
     async def load_confidence_state(self) -> Dict[str, dict]:
         """Load all confidence scorer states."""
+        self._ensure_connected()
         cursor = await self._db.execute("SELECT * FROM confidence_state")
         rows = await cursor.fetchall()
         result = {}
@@ -242,6 +252,7 @@ class Database:
 
     async def load_dashboard_coins(self) -> List[dict]:
         """Load saved dashboard coin states."""
+        self._ensure_connected()
         cursor = await self._db.execute("SELECT * FROM dashboard_coins")
         rows = await cursor.fetchall()
         return [{"symbol": row["symbol"], "active": bool(row["active"])} for row in rows]
@@ -252,6 +263,7 @@ class Database:
 
     async def save_baseline(self, symbol: str, liq_volume: float, trade_volume: float):
         """Save hourly baseline snapshot."""
+        self._ensure_connected()
         await self._db.execute(
             """INSERT INTO hourly_baselines (symbol, liq_volume, trade_volume, recorded_at)
                VALUES (?, ?, ?, ?)""",
@@ -261,6 +273,7 @@ class Database:
 
     async def load_baselines(self, symbol: str, hours: int = 24) -> List[dict]:
         """Load baseline history for a symbol."""
+        self._ensure_connected()
         cutoff = time.time() - (hours * 3600)
         cursor = await self._db.execute(
             """SELECT * FROM hourly_baselines
@@ -273,6 +286,7 @@ class Database:
 
     async def cleanup_old_baselines(self, max_age_hours: int = 72):
         """Remove baselines older than max_age_hours."""
+        self._ensure_connected()
         cutoff = time.time() - (max_age_hours * 3600)
         await self._db.execute(
             "DELETE FROM hourly_baselines WHERE recorded_at < ?", (cutoff,)
@@ -285,6 +299,8 @@ class Database:
 
     async def export_signals_csv(self, limit: int = 1000) -> str:
         """Export signals to CSV string (for spreadsheet/Google Drive)."""
+        self._ensure_connected()
+        limit = min(max(limit, 1), 10000)
         cursor = await self._db.execute(
             "SELECT * FROM signals ORDER BY created_at DESC LIMIT ?",
             (limit,)
@@ -306,19 +322,19 @@ class Database:
         # Data
         for row in rows:
             row_dict = dict(row)
-            # Convert timestamps to readable format
-            from datetime import datetime
+            # Convert timestamps to readable UTC format
             for ts_field in ["created_at", "checked_at"]:
                 if row_dict.get(ts_field):
                     row_dict[ts_field] = datetime.fromtimestamp(
-                        row_dict[ts_field]
-                    ).strftime("%Y-%m-%d %H:%M:%S")
+                        row_dict[ts_field], tz=timezone.utc
+                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
             writer.writerow([row_dict.get(col, "") for col in columns])
 
         return output.getvalue()
 
     async def export_baselines_csv(self, symbol: str = None) -> str:
         """Export baselines to CSV string."""
+        self._ensure_connected()
         if symbol:
             cursor = await self._db.execute(
                 "SELECT * FROM hourly_baselines WHERE symbol = ? ORDER BY recorded_at DESC",
@@ -339,11 +355,10 @@ class Database:
 
         for row in rows:
             row_dict = dict(row)
-            from datetime import datetime
             if row_dict.get("recorded_at"):
                 row_dict["recorded_at"] = datetime.fromtimestamp(
-                    row_dict["recorded_at"]
-                ).strftime("%Y-%m-%d %H:%M:%S")
+                    row_dict["recorded_at"], tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S UTC")
             writer.writerow([row_dict.get("symbol", ""),
                              row_dict.get("liq_volume", 0),
                              row_dict.get("trade_volume", 0),

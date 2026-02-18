@@ -19,7 +19,7 @@ Algorithm:
 5. If all pass, approve and add cooldown
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import hashlib
 
@@ -124,7 +124,7 @@ class SignalValidator:
                 self._total_rejected += 1
                 self._rejection_reasons["cooldown"] += 1
                 cooldown_until = self.signal_cooldowns[signal_key]
-                remaining = (cooldown_until - datetime.now()).total_seconds() / 60
+                remaining = (cooldown_until - datetime.now(timezone.utc)).total_seconds() / 60
                 reason = f"In cooldown (remaining: {remaining:.1f} min)"
                 self.logger.debug(f"❌ Rejected: {reason}")
                 return (False, reason)
@@ -196,7 +196,7 @@ class SignalValidator:
             True if duplicate, False otherwise
         """
         # Clean old hashes (older than 10 minutes)
-        cutoff = datetime.now() - timedelta(minutes=10)
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
         self.recent_hashes = {
             h: t for h, t in self.recent_hashes.items()
             if t > cutoff
@@ -219,7 +219,7 @@ class SignalValidator:
             True if in cooldown, False otherwise
         """
         # Clean expired cooldowns
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         self.signal_cooldowns = {
             k: t for k, t in self.signal_cooldowns.items()
             if t > now
@@ -239,7 +239,7 @@ class SignalValidator:
             True if rate limited, False otherwise
         """
         # Clean signals older than 1 hour
-        cutoff = datetime.now() - timedelta(hours=1)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         self.recent_signals = [
             t for t in self.recent_signals
             if t > cutoff
@@ -260,7 +260,7 @@ class SignalValidator:
             signal_key: Signal key
             signal_hash: Signal hash
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         
         # Add to rate limit tracking
         self.recent_signals.append(now)
@@ -279,7 +279,7 @@ class SignalValidator:
             Number of signals remaining
         """
         # Clean old signals
-        cutoff = datetime.now() - timedelta(hours=1)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
         self.recent_signals = [
             t for t in self.recent_signals
             if t > cutoff
@@ -305,7 +305,7 @@ class SignalValidator:
         if not cooldown_until:
             return None
         
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         if now >= cooldown_until:
             return None
         

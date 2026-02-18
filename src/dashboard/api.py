@@ -12,14 +12,17 @@ Provides REST API and WebSocket endpoints for:
 - Mobile-responsive web interface
 """
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, HTTPException, WebSocketDisconnect, Depends, Header, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 import hmac
+import html as html_mod
 import json
+import logging
 import queue
 import re
 import threading
@@ -42,14 +45,26 @@ if _config_path.exists():
 _raw_token = _dashboard_config.get("api_token", "")
 # Reject placeholder token — treat as no auth (force user to set real token)
 if _raw_token and "GANTI" in _raw_token.upper():
-    import logging
     logging.getLogger("DashboardAPI").warning(
         "api_token is still the default placeholder — auth DISABLED. "
-        "Set a real token in config/config.yaml → dashboard.api_token"
+        "Set a real token in config/config.yaml -> dashboard.api_token"
     )
     _raw_token = ""
 API_TOKEN = _raw_token
 CORS_ORIGINS = _dashboard_config.get("cors_origins", ["http://localhost:3000"])
+
+# Symbol validation regex: uppercase alphanumeric, 3-20 chars (e.g. BTCUSDT, 1000PEPEUSDT)
+_SYMBOL_RE = re.compile(r'^[A-Z0-9]{3,20}$')
+
+def _validate_symbol(symbol: str) -> str:
+    """Validate and sanitize a trading symbol from URL path or query params."""
+    symbol = symbol.upper().strip()
+    if not _SYMBOL_RE.match(symbol):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid symbol format. Use only uppercase letters/numbers (3-20 chars)"
+        )
+    return symbol
 
 async def verify_token(authorization: str = Header(None)):
     """Simple Bearer token auth with constant-time comparison."""
@@ -57,7 +72,7 @@ async def verify_token(authorization: str = Header(None)):
         return True  # Skip auth if token not set in config
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
-    provided = authorization.replace("Bearer ", "")
+    provided = authorization.replace("Bearer ", "", 1)
     if not hmac.compare_digest(provided, API_TOKEN):
         raise HTTPException(status_code=403, detail="Invalid token")
     return True
@@ -88,11 +103,37 @@ async def check_rate_limit(request: Request):
         raise HTTPException(status_code=429, detail="Too many requests")
     _rate_limit_store[client_ip].append(now)
 
+# Lifespan context manager (replaces deprecated on_event)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: startup and shutdown logic."""
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
+    print("=" * 60)
+    print("TELEGLAS Dashboard API Started")
+    print("=" * 60)
+    print("Dashboard URL: http://localhost:8080")
+    print("WebSocket URL: ws://localhost:8080/ws")
+    print("API Endpoints: http://localhost:8080/docs")
+    if not API_TOKEN:
+        print("WARNING: No API token configured - auth is DISABLED")
+    print("=" * 60)
+    yield
+    # Shutdown
+    for connection in list(active_connections):
+        try:
+            await connection.close()
+        except Exception:
+            pass
+    active_connections.clear()
+    print("Dashboard API Shutdown Complete")
+
 # Create FastAPI app
 app = FastAPI(
     title="TELEGLAS Pro Dashboard",
     description="Real-time cryptocurrency trading intelligence dashboard",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # CORS middleware for local development
@@ -113,15 +154,18 @@ if static_dir.exists():
 # Prevents data corruption when multiple threads access system_state
 state_lock = threading.Lock()
 
-# Thread-safe queue for subscription requests from dashboard → main.py
+# Thread-safe queue for subscription requests from dashboard -> main.py
 # Items are dicts: {"action": "subscribe"|"unsubscribe", "symbol": "BTCUSDT"}
 _subscription_queue: queue.Queue = queue.Queue()
 
-# Event loop reference (set by startup event) for cross-thread broadcasting
+# Event loop reference (set by lifespan) for cross-thread broadcasting
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Database reference (set by main.py after init)
 _db = None
+
+# Monotonic signal ID counter (thread-safe via state_lock)
+_signal_id_counter = 0
 
 # Global state (updated by main.py)
 system_state = {
@@ -163,8 +207,6 @@ async def root():
     if html_file.exists():
         if API_TOKEN:
             # Inject token as meta tag so frontend can authenticate
-            from fastapi.responses import HTMLResponse
-            import html as html_mod
             html_content = html_file.read_text()
             safe_token = html_mod.escape(API_TOKEN, quote=True)
             token_meta = f'<meta name="api-token" content="{safe_token}">'
@@ -173,61 +215,39 @@ async def root():
         return FileResponse(str(html_file))
     return {"message": "Dashboard HTML not found. Please create src/dashboard/static/index.html"}
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring/load balancers."""
+    with state_lock:
+        uptime = system_state["stats"].get("uptime_seconds", 0)
+        coins_count = len(system_state["coins"])
+    return {"status": "ok", "uptime_seconds": uptime, "coins_tracked": coins_count}
+
 @app.get("/api/stats")
-async def get_stats():
-    """
-    Get current system statistics (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe read with lock
-    
-    Returns:
-        dict: System statistics including messages, signals, alerts, errors
-    """
+async def get_stats(_rl=Depends(check_rate_limit)):
+    """Get current system statistics (thread-safe, rate-limited)."""
     with state_lock:
         return deepcopy(system_state["stats"])
 
 @app.get("/api/coins")
-async def get_coins():
-    """
-    Get list of monitored coins with their current status (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe read with lock
-    
-    Returns:
-        dict: List of coins with order flow data
-    """
+async def get_coins(_rl=Depends(check_rate_limit)):
+    """Get list of monitored coins with their current status (thread-safe, rate-limited)."""
     with state_lock:
         return {"coins": deepcopy(system_state["coins"])}
 
 @app.get("/api/signals")
-async def get_signals(limit: int = 50):
-    """
-    Get recent signals (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe read with lock
-    
-    Args:
-        limit: Maximum number of signals to return (default 50)
-        
-    Returns:
-        dict: List of signals (most recent first)
-    """
+async def get_signals(limit: int = 50, _rl=Depends(check_rate_limit)):
+    """Get recent signals (thread-safe, rate-limited)."""
+    limit = min(max(limit, 1), 200)  # Clamp to 1-200
     with state_lock:
         signals = deepcopy(system_state["signals"][-limit:])
     signals.reverse()  # Most recent first
     return {"signals": signals}
 
 @app.get("/api/orderflow/{symbol}")
-async def get_order_flow(symbol: str):
-    """
-    Get current order flow data for a specific symbol
-    
-    Args:
-        symbol: Trading pair symbol (e.g., BTCUSDT)
-        
-    Returns:
-        dict: Order flow data including buy/sell ratios and large orders
-    """
+async def get_order_flow(symbol: str, _rl=Depends(check_rate_limit)):
+    """Get current order flow data for a specific symbol."""
+    symbol = _validate_symbol(symbol)
     with state_lock:
         flow = deepcopy(system_state["order_flow"].get(symbol, {
             "buy_ratio": 0,
@@ -240,41 +260,29 @@ async def get_order_flow(symbol: str):
 
 @app.post("/api/coins/add")
 async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Depends(check_rate_limit)):
-    """
-    Add a new coin to monitoring with input validation
-    
-    SECURITY FIX Bug #4: Added input validation to prevent XSS/injection
-    
-    Args:
-        request: AddCoinRequest with symbol
-        
-    Returns:
-        dict: Success status and coin data
-        
-    Raises:
-        HTTPException: If coin already exists or invalid input
-    """
-    # SECURITY FIX: Validate and sanitize input
+    """Add a new coin to monitoring with input validation."""
+    # Validate and sanitize input
     symbol = request.symbol.upper().strip()
-    
-    # Remove common suffixes if present
+
+    # Remove common suffixes using endswith (not replace, to avoid mangling USDC etc.)
     for suffix in ['USDT', 'BUSD', 'USD']:
-        symbol = symbol.replace(suffix, '')
-    
-    # SECURITY: Validate format - only alphanumeric, 1-10 characters
+        if symbol.endswith(suffix):
+            symbol = symbol[:-len(suffix)]
+            break  # Only strip one suffix
+
+    # Validate format - only alphanumeric, 1-10 characters
     if not re.match(r'^[A-Z0-9]{1,10}$', symbol):
         raise HTTPException(
             status_code=400,
             detail="Invalid symbol format. Use only letters and numbers (1-10 characters)"
         )
-    
-    # SECURITY: Check for empty symbol after sanitization
+
     if not symbol:
         raise HTTPException(status_code=400, detail="Symbol cannot be empty")
-    
+
     # Reconstruct with USDT
     symbol = symbol + "USDT"
-    
+
     # Add to coins list (thread-safe: check + append under same lock)
     new_coin = {
         "symbol": symbol,
@@ -301,18 +309,9 @@ async def add_coin(request: AddCoinRequest, _auth=Depends(verify_token), _rl=Dep
 
 @app.delete("/api/coins/remove/{symbol}")
 async def remove_coin(symbol: str, _auth=Depends(verify_token), _rl=Depends(check_rate_limit)):
-    """
-    Remove a coin from monitoring (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe write with lock
-    
-    Args:
-        symbol: Symbol to remove
-        
-    Returns:
-        dict: Success status
-    """
-    # CRITICAL FIX: Thread-safe modification
+    """Remove a coin from monitoring (thread-safe, validated)."""
+    symbol = _validate_symbol(symbol)
+
     with state_lock:
         system_state["coins"] = [c for c in system_state["coins"] if c["symbol"] != symbol]
 
@@ -327,31 +326,20 @@ async def remove_coin(symbol: str, _auth=Depends(verify_token), _rl=Depends(chec
 @app.patch("/api/coins/{symbol}/toggle")
 async def toggle_coin(symbol: str, request: ToggleCoinRequest,
                       _auth=Depends(verify_token), _rl=Depends(check_rate_limit)):
-    """
-    Enable/disable alerts for a coin
-    
-    Args:
-        symbol: Symbol to toggle
-        request: ToggleCoinRequest with active status
-        
-    Returns:
-        dict: Success status and updated coin data
-        
-    Raises:
-        HTTPException: If coin not found
-    """
-    # CRITICAL FIX Bug #5: Thread-safe read and modify
+    """Enable/disable alerts for a coin (validated)."""
+    symbol = _validate_symbol(symbol)
+
     with state_lock:
         coin = next((c for c in system_state["coins"] if c["symbol"] == symbol), None)
         if not coin:
             raise HTTPException(status_code=404, detail="Coin not found")
-        
+
         coin["active"] = request.active
         coin_copy = deepcopy(coin)
-    
+
     # Broadcast to all WebSocket clients
     await broadcast_update("coin_toggled", coin_copy)
-    
+
     return {"success": True, "coin": coin_copy}
 
 # ============================================================================
@@ -377,10 +365,15 @@ async def export_baselines_csv(symbol: str = None, _auth=Depends(verify_token)):
     """Export hourly baselines as CSV file."""
     if not _db:
         raise HTTPException(status_code=503, detail="Database not initialized")
+    # Validate symbol if provided
+    if symbol:
+        symbol = _validate_symbol(symbol)
     csv_data = await _db.export_baselines_csv(symbol=symbol)
     if not csv_data:
         raise HTTPException(status_code=404, detail="No baselines to export")
-    filename = f"teleglas_baselines_{symbol}.csv" if symbol else "teleglas_baselines.csv"
+    # Sanitize filename: only allow safe characters
+    safe_sym = re.sub(r'[^A-Z0-9]', '', symbol) if symbol else ""
+    filename = f"teleglas_baselines_{safe_sym}.csv" if safe_sym else "teleglas_baselines.csv"
     return Response(
         content=csv_data,
         media_type="text/csv",
@@ -401,7 +394,9 @@ async def get_signal_history(symbol: str = None, limit: int = 100, _auth=Depends
     """Get signal history from database (persisted across restarts)."""
     if not _db:
         raise HTTPException(status_code=503, detail="Database not initialized")
+    limit = min(max(limit, 1), 5000)  # Clamp to 1-5000
     if symbol:
+        symbol = _validate_symbol(symbol)
         signals = await _db.get_signals_by_symbol(symbol, limit)
     else:
         signals = await _db.get_recent_signals(limit)
@@ -414,10 +409,7 @@ async def get_signal_history(symbol: str = None, limit: int = 100, _auth=Depends
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """
-    WebSocket endpoint for real-time updates
-
-    CRITICAL FIX Bug #2: Wait for system initialization before sending state
-    to prevent race condition where dashboard receives incomplete coin data.
+    WebSocket endpoint for real-time updates.
 
     Sends:
     - Initial state on connection (after init complete)
@@ -441,7 +433,7 @@ async def websocket_endpoint(websocket: WebSocket):
             return
 
     active_connections.append(websocket)
-    
+
     # Wait for system initialization (max 3 seconds)
     retry_count = 0
     while retry_count < 30:  # 30 * 0.1s = 3 seconds max wait
@@ -461,16 +453,15 @@ async def websocket_endpoint(websocket: WebSocket):
         "type": "initial_state",
         "data": state_snapshot
     })
-    
+
     try:
         while True:
-            # Keep connection alive and receive messages
-            data = await websocket.receive_text()
-            # Echo back for debugging
-            await websocket.send_text(f"Server received: {data}")
+            # Keep connection alive - receive messages but don't echo back
+            await websocket.receive_text()
     except WebSocketDisconnect:
-        active_connections.remove(websocket)
-    except Exception as e:
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+    except Exception:
         if websocket in active_connections:
             active_connections.remove(websocket)
 
@@ -479,26 +470,20 @@ async def websocket_endpoint(websocket: WebSocket):
 # ============================================================================
 
 async def broadcast_update(event_type: str, data):
-    """
-    Broadcast updates to all connected WebSocket clients
-    
-    Args:
-        event_type: Type of event (e.g., "stats_update", "new_signal")
-        data: Event data to broadcast
-    """
+    """Broadcast updates to all connected WebSocket clients."""
     message = {
         "type": event_type,
         "data": data,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
-    
+
     disconnected = []
     for connection in list(active_connections):
         try:
             await connection.send_json(message)
         except Exception:
             disconnected.append(connection)
-    
+
     # Remove disconnected clients
     for conn in disconnected:
         if conn in active_connections:
@@ -509,33 +494,15 @@ async def broadcast_update(event_type: str, data):
 # ============================================================================
 
 def update_stats(stats: dict):
-    """
-    Update system statistics (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe write with lock
-    
-    Called periodically from main.py to update dashboard stats
-    
-    Args:
-        stats: Dictionary with current system statistics
-    """
-    # CRITICAL FIX: Thread-safe write
+    """Update system statistics (thread-safe)."""
     with state_lock:
         system_state["stats"] = deepcopy(stats)
-    
+
     # Schedule broadcast via stored event loop (safe from any thread)
     _schedule_broadcast("stats_update", stats)
 
 def update_order_flow(symbol: str, flow_data: dict):
-    """
-    Update order flow for a symbol (thread-safe)
-
-    Called when new order flow data is available
-
-    Args:
-        symbol: Trading pair symbol
-        flow_data: Order flow data (buy_ratio, sell_ratio, large orders)
-    """
+    """Update order flow for a symbol (thread-safe)."""
     with state_lock:
         system_state["order_flow"][symbol] = {
             **flow_data,
@@ -551,18 +518,13 @@ def update_order_flow(symbol: str, flow_data: dict):
     _schedule_broadcast("order_flow_update", {"symbol": symbol, **flow_data})
 
 def add_signal(signal: dict):
-    """
-    Add a new signal to the dashboard (thread-safe)
-
-    Called when a new trading signal is generated
-
-    Args:
-        signal: Signal data dictionary
-    """
+    """Add a new signal to the dashboard (thread-safe, monotonic IDs)."""
+    global _signal_id_counter
     now = datetime.now(timezone.utc)
     with state_lock:
+        _signal_id_counter += 1
         signal_data = {
-            "id": len(system_state["signals"]) + 1,
+            "id": _signal_id_counter,
             "time": now.strftime("%H:%M:%S"),
             "timestamp": now.isoformat(),
             **signal
@@ -578,34 +540,22 @@ def add_signal(signal: dict):
 
 def _schedule_broadcast(event_type: str, data):
     """Schedule an async broadcast from any thread using the stored event loop."""
-    if _event_loop and _event_loop.is_running():
-        _event_loop.call_soon_threadsafe(
-            asyncio.ensure_future,
-            broadcast_update(event_type, data)
-        )
+    try:
+        if _event_loop and _event_loop.is_running():
+            _event_loop.call_soon_threadsafe(
+                asyncio.ensure_future,
+                broadcast_update(event_type, data)
+            )
+    except RuntimeError:
+        pass  # Event loop closed during shutdown - safe to ignore
 
 def get_monitored_coins() -> List[str]:
-    """
-    Get list of currently monitored and active coins (thread-safe)
-
-    CRITICAL FIX Bug #5: Thread-safe read with lock
-
-    Returns:
-        List of symbol strings for coins that are active
-    """
+    """Get list of currently monitored and active coins (thread-safe)."""
     with state_lock:
         return [coin["symbol"] for coin in system_state["coins"] if coin.get("active", True)]
 
 def get_pending_subscriptions() -> List[dict]:
-    """
-    Drain all pending subscription requests from the dashboard.
-
-    Called by main.py's dynamic_subscription_task to process
-    add/remove coin requests from the dashboard UI.
-
-    Returns:
-        List of {"action": "subscribe"|"unsubscribe", "symbol": str}
-    """
+    """Drain all pending subscription requests from the dashboard."""
     requests = []
     while not _subscription_queue.empty():
         try:
@@ -615,17 +565,7 @@ def get_pending_subscriptions() -> List[dict]:
     return requests
 
 def initialize_coins(initial_coins: List[str]):
-    """
-    Initialize dashboard with starting coins (thread-safe)
-    
-    CRITICAL FIX Bug #5: Thread-safe write with lock
-    
-    Called at startup to populate initial coin list
-    
-    Args:
-        initial_coins: List of symbols to monitor
-    """
-    # CRITICAL FIX: Thread-safe initialization
+    """Initialize dashboard with starting coins (thread-safe)."""
     with state_lock:
         system_state["coins"] = [
             {
@@ -641,43 +581,14 @@ def initialize_coins(initial_coins: List[str]):
         ]
 
 # ============================================================================
-# STARTUP/SHUTDOWN EVENTS
-# ============================================================================
-
-@app.on_event("startup")
-async def startup_event():
-    """Run on application startup"""
-    global _event_loop
-    _event_loop = asyncio.get_running_loop()
-    print("=" * 60)
-    print("🚀 TELEGLAS Dashboard API Started")
-    print("=" * 60)
-    print("📊 Dashboard URL: http://localhost:8080")
-    print("🔌 WebSocket URL: ws://localhost:8080/ws")
-    print("📡 API Endpoints: http://localhost:8080/docs")
-    print("=" * 60)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Run on application shutdown"""
-    # Close all WebSocket connections
-    for connection in list(active_connections):
-        try:
-            await connection.close()
-        except Exception:
-            pass
-    active_connections.clear()
-    print("👋 Dashboard API Shutdown Complete")
-
-# ============================================================================
 # MAIN (for standalone testing)
 # ============================================================================
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
-        app, 
-        host="0.0.0.0", 
-        port=8080, 
+        app,
+        host="0.0.0.0",
+        port=8080,
         log_level="info"
     )

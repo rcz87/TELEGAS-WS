@@ -18,6 +18,7 @@ Algorithm:
 4. Return signals for detected events
 """
 
+import time as _time
 from typing import List, Optional
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -259,8 +260,6 @@ class EventPatternDetector:
             EventSignal if detected, None otherwise
         """
         try:
-            import time as _time
-
             # Get recent trades (1 minute) - the potential spike window
             recent_trades = self.buffer_manager.get_trades(symbol, time_window=60)
 

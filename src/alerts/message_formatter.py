@@ -230,8 +230,8 @@ Sell Volume: ${sell_vol/1000:.0f}K ({sell_pct:.0f}%)
 {sell_bar}
 
 🐋 *Whale Activity*
-• Large Buys: {metadata.get('large_buys', 0)} orders >$10K
-• Large Sells: {metadata.get('large_sells', 0)} orders >$10K
+• Large Buys: {metadata.get('large_buys', 0)} whale orders
+• Large Sells: {metadata.get('large_sells', 0)} whale orders
 
 📊 Net Delta: ${net_delta/1000:+.0f}K ({delta_label})
 

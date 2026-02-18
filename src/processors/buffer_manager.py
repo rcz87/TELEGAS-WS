@@ -53,9 +53,9 @@ class BufferManager:
         self._total_trades = 0
         self._symbols_tracked = set()
         
-        # CRITICAL FIX Bug #10: Track dropped messages
-        self._dropped_liquidations = 0
-        self._dropped_trades = 0
+        # Track evicted messages (oldest auto-removed when buffer full)
+        self._evicted_liquidations = 0
+        self._evicted_trades = 0
 
         # Rolling baseline: track hourly volume per symbol for context
         # Key: symbol, Value: list of (timestamp, volume) tuples per hour
@@ -91,10 +91,10 @@ class BufferManager:
 
                 buffer = self.liquidation_buffers[symbol]
                 if len(buffer) >= self.max_liquidations:
-                    self._dropped_liquidations += 1
-                    if self._dropped_liquidations % 100 == 1:
+                    self._evicted_liquidations += 1
+                    if self._evicted_liquidations % 100 == 1:
                         self.logger.warning(
-                            f"Buffer overflow: {self._dropped_liquidations} liquidations dropped total"
+                            f"Buffer full: {self._evicted_liquidations} oldest liquidations evicted total"
                         )
 
                 buffer.append(event_copy)
@@ -124,10 +124,10 @@ class BufferManager:
 
                 buffer = self.trade_buffers[symbol]
                 if len(buffer) >= self.max_trades:
-                    self._dropped_trades += 1
-                    if self._dropped_trades % 100 == 1:
+                    self._evicted_trades += 1
+                    if self._evicted_trades % 100 == 1:
                         self.logger.warning(
-                            f"Buffer overflow: {self._dropped_trades} trades dropped total"
+                            f"Buffer full: {self._evicted_trades} oldest trades evicted total"
                         )
 
                 buffer.append(event_copy)
@@ -305,18 +305,19 @@ class BufferManager:
     
     def clear_symbol(self, symbol: str):
         """
-        Clear all data for specific symbol
-        
+        Clear all data for specific symbol (thread-safe)
+
         Args:
             symbol: Trading pair
         """
-        if symbol in self.liquidation_buffers:
-            self.liquidation_buffers[symbol].clear()
-            self.logger.info(f"Cleared liquidation buffer for {symbol}")
-        
-        if symbol in self.trade_buffers:
-            self.trade_buffers[symbol].clear()
-            self.logger.info(f"Cleared trade buffer for {symbol}")
+        with self._lock:
+            if symbol in self.liquidation_buffers:
+                self.liquidation_buffers[symbol].clear()
+                self.logger.info(f"Cleared liquidation buffer for {symbol}")
+
+            if symbol in self.trade_buffers:
+                self.trade_buffers[symbol].clear()
+                self.logger.info(f"Cleared trade buffer for {symbol}")
     
     def clear_all(self):
         """Clear all buffers"""
@@ -329,18 +330,19 @@ class BufferManager:
     
     def get_buffer_size(self, symbol: str) -> Dict[str, int]:
         """
-        Get buffer sizes for symbol
-        
+        Get buffer sizes for symbol (thread-safe)
+
         Args:
             symbol: Trading pair
-            
+
         Returns:
             Dictionary with liquidations and trades counts
         """
-        return {
-            "liquidations": len(self.liquidation_buffers.get(symbol, [])),
-            "trades": len(self.trade_buffers.get(symbol, []))
-        }
+        with self._lock:
+            return {
+                "liquidations": len(self.liquidation_buffers.get(symbol, [])),
+                "trades": len(self.trade_buffers.get(symbol, []))
+            }
     
     def get_tracked_symbols(self) -> List[str]:
         """Get list of tracked symbols"""
@@ -441,29 +443,33 @@ class BufferManager:
             "symbols_list": self.get_tracked_symbols(),
             "avg_liquidations_per_symbol": total_liq_in_buffers / max(len(self.liquidation_buffers), 1),
             "avg_trades_per_symbol": total_trades_in_buffers / max(len(self.trade_buffers), 1),
-            # CRITICAL FIX Bug #10: Report dropped messages
-            "dropped_liquidations": self._dropped_liquidations,
-            "dropped_trades": self._dropped_trades,
-            "drop_rate_liquidations": self._dropped_liquidations / max(self._total_liquidations, 1) * 100,
-            "drop_rate_trades": self._dropped_trades / max(self._total_trades, 1) * 100
+            # Track evicted messages (oldest auto-removed when buffer full)
+            "evicted_liquidations": self._evicted_liquidations,
+            "evicted_trades": self._evicted_trades,
+            "eviction_rate_liquidations": self._evicted_liquidations / max(self._total_liquidations, 1) * 100,
+            "eviction_rate_trades": self._evicted_trades / max(self._total_trades, 1) * 100
         }
     
     def get_memory_usage_estimate(self) -> dict:
-        """Estimate memory usage in KB"""
+        """Estimate memory usage in KB (thread-safe)"""
         import sys
-        
+
         total_size = 0
-        
-        # Estimate liquidation buffers
-        for symbol, buffer in self.liquidation_buffers.items():
-            for event in buffer:
+
+        with self._lock:
+            # Snapshot buffer references under lock
+            liq_buffers = list(self.liquidation_buffers.values())
+            trade_buffers = list(self.trade_buffers.values())
+
+        # Estimate outside lock for performance
+        for buffer in liq_buffers:
+            for event in list(buffer):
                 total_size += sys.getsizeof(event)
-        
-        # Estimate trade buffers
-        for symbol, buffer in self.trade_buffers.items():
-            for event in buffer:
+
+        for buffer in trade_buffers:
+            for event in list(buffer):
                 total_size += sys.getsizeof(event)
-        
+
         return {
             "total_kb": total_size / 1024,
             "total_mb": total_size / (1024 * 1024)

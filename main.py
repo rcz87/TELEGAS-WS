@@ -55,12 +55,16 @@ from src.utils.logger import setup_logger
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
 
-def start_dashboard_server():
-    """Start dashboard server in background thread"""
+def start_dashboard_server(host: str = "0.0.0.0", port: int = 8080):
+    """Start dashboard server in background thread.
+
+    WARNING: Default host 0.0.0.0 binds to all interfaces.
+    Use 127.0.0.1 if you don't need remote access.
+    """
     uvicorn.run(
         dashboard_api.app,
-        host="0.0.0.0",
-        port=8080,
+        host=host,
+        port=port,
         log_level="warning"
     )
 
@@ -181,6 +185,7 @@ class TeleglasPro:
         self.analysis_locks = {}  # Per-symbol locks
         self.last_analysis = {}   # Per-symbol last analysis time
         self._analysis_tasks: set = set()
+        self._max_tracked_symbols = 500  # Limit analysis tracking to prevent memory leak
         
         # Statistics
         self.stats = {
@@ -491,7 +496,7 @@ class TeleglasPro:
         """
         try:
             # Debounce: Don't analyze same symbol within 5 seconds
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             if symbol in self.last_analysis:
                 if now - self.last_analysis[symbol] < 5:
                     return
@@ -716,7 +721,7 @@ class TeleglasPro:
                             self.logger.info(f"📡 Dashboard unsubscription: {trade_channel}")
 
                 # --- Auto-discovery check (every 5 minutes) ---
-                now = asyncio.get_event_loop().time()
+                now = asyncio.get_running_loop().time()
                 if now - last_discovery_check < 300:
                     continue
                 last_discovery_check = now
@@ -759,6 +764,18 @@ class TeleglasPro:
 
             self.logger.info("🧹 Running cleanup...")
             self.buffer_manager.cleanup_old_data(max_age_seconds=7200)  # 2 hours
+
+            # Cleanup stale analysis locks/timestamps to prevent memory leak
+            now = asyncio.get_running_loop().time()
+            stale_symbols = [
+                s for s, t in self.last_analysis.items()
+                if now - t > 3600  # Not analyzed in last hour
+            ]
+            for s in stale_symbols:
+                self.last_analysis.pop(s, None)
+                self.analysis_locks.pop(s, None)
+            if stale_symbols:
+                self.logger.info(f"🧹 Cleaned {len(stale_symbols)} stale analysis entries")
 
             # Update hourly baseline for context comparison
             self.buffer_manager.update_hourly_baseline()
@@ -844,6 +861,12 @@ class TeleglasPro:
             self.logger.info("Shutting down...")
             await self.websocket_client.disconnect()
 
+            # Drain remaining alerts before cancelling (max 10s)
+            if not self.alert_queue.is_empty():
+                remaining = self.alert_queue.size()
+                self.logger.info(f"⏳ Draining {remaining} remaining alerts...")
+                await self.alert_queue.wait_empty(timeout=10.0)
+
             # Cancel background tasks
             for task in tasks:
                 task.cancel()
@@ -874,7 +897,7 @@ def validate_config(config: dict) -> tuple[bool, list[str]]:
         Tuple of (is_valid, list_of_errors)
     """
     errors = []
-    required_sections = ['pairs', 'thresholds', 'signals', 'alerts', 'buffers', 'websocket', 'monitoring']
+    required_sections = ['pairs', 'thresholds', 'signals', 'alerts', 'buffers', 'websocket', 'monitoring', 'dashboard']
     
     for section in required_sections:
         if section not in config:
@@ -959,6 +982,10 @@ def load_config() -> dict:
             'analysis': {
                 'stop_hunt_window': 30,
                 'order_flow_window': 300
+            },
+            'dashboard': {
+                'api_token': '',
+                'cors_origins': ['http://localhost:3000', 'http://localhost:8080']
             }
         }
     
@@ -975,9 +1002,14 @@ def load_config() -> dict:
     return config
 
 def handle_shutdown(signum=None, frame=None):
-    """Handle shutdown signals"""
+    """Handle shutdown signals (async-safe via call_soon_threadsafe)"""
     print("\n🛑 Received shutdown signal")
-    shutdown_event.set()
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_soon_threadsafe(shutdown_event.set)
+    except RuntimeError:
+        # No running loop — set directly as fallback
+        shutdown_event.set()
 
 async def main():
     """Main entry point"""
