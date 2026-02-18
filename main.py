@@ -50,6 +50,9 @@ from src.alerts.message_formatter import MessageFormatter
 from src.alerts.telegram_bot import TelegramBot
 from src.alerts.alert_queue import AlertQueue
 from src.storage.database import Database
+from src.connection.rest_poller import CoinGlassRestPoller
+from src.processors.market_context_buffer import MarketContextBuffer
+from src.signals.market_context_filter import MarketContextFilter
 from src.utils.logger import setup_logger
 
 # Global flag for shutdown
@@ -138,6 +141,26 @@ class TeleglasPro:
         db_path = storage_config.get('database_url', 'data/teleglas.db')
         self.db = Database(db_path=db_path)
 
+        # Market Context (OI + Funding Rate from CoinGlass REST API)
+        market_context_config = config.get('market_context', {})
+        coinglass_config = config.get('coinglass', {})
+        self.market_context_buffer = MarketContextBuffer(
+            max_snapshots=market_context_config.get('max_snapshots', 72)
+        )
+        self.market_context_filter = MarketContextFilter(
+            market_context_buffer=self.market_context_buffer,
+            mode=market_context_config.get('filter_mode', 'normal'),
+            enable_confidence_adjust=market_context_config.get('confidence_adjust', True),
+        )
+        rest_symbols = self._build_rest_symbols(pairs_config)
+        self.rest_poller = CoinGlassRestPoller(
+            api_key=coinglass_config.get('api_key', ''),
+            symbols=rest_symbols,
+            poll_interval=market_context_config.get('poll_interval', 300),
+            on_oi_data=self._on_oi_data,
+            on_funding_data=self._on_funding_data,
+        )
+
         # Signal outcome tracker (with DB callback for persistence)
         self.signal_tracker = SignalTracker(
             buffer_manager=self.buffer_manager,
@@ -158,7 +181,6 @@ class TeleglasPro:
         
         # WebSocket
         ws_config = config.get('websocket', {})
-        coinglass_config = config.get('coinglass', {})
         self.websocket_client = WebSocketClient(
             api_key=coinglass_config.get('api_key', ''),
             url=ws_config.get('url', "wss://open-ws.coinglass.com/ws-api"),
@@ -235,7 +257,7 @@ class TeleglasPro:
         
         # Subscribe to futures trades for all configured coins (primary + secondary)
         for symbol in self.trade_symbols:
-            trade_channel = f"futures_trades@all_{symbol}@0"
+            trade_channel = f"futures_trades@all_{symbol}@10000"
             subscribe_msg = {
                 "method": "subscribe",
                 "channels": [trade_channel]
@@ -290,6 +312,20 @@ class TeleglasPro:
             self.stats['errors'] += 1
             self.logger.error(f"Message processing error: {e}")
     
+    @staticmethod
+    def _normalize_ws_event(event: dict) -> dict:
+        """
+        Normalize CoinGlass WebSocket field names to internal format.
+
+        CoinGlass API sends:  volUsd, exName, baseAsset
+        Our internal code uses: vol, exchange
+        """
+        if "volUsd" in event and "vol" not in event:
+            event["vol"] = event["volUsd"]
+        if "exName" in event and "exchange" not in event:
+            event["exchange"] = event["exName"]
+        return event
+
     async def _handle_liquidation_message(self, message: dict):
         """
         Process liquidation order messages from ALL coins.
@@ -304,6 +340,9 @@ class TeleglasPro:
                 data = [data] if data else []
 
             for liq_event in data:
+                # Normalize CoinGlass field names (volUsd -> vol, exName -> exchange)
+                self._normalize_ws_event(liq_event)
+
                 # Validate structure
                 validation = self.data_validator.validate_liquidation(liq_event)
                 if validation.is_valid:
@@ -344,6 +383,9 @@ class TeleglasPro:
                 data = [data] if data else []
 
             for trade in data:
+                # Normalize CoinGlass field names (volUsd -> vol, exName -> exchange)
+                self._normalize_ws_event(trade)
+
                 # Validate structure
                 validation = self.data_validator.validate_trade(trade)
                 if validation.is_valid:
@@ -381,6 +423,49 @@ class TeleglasPro:
         if symbol in all_symbols:
             return symbol in active_coins
         return True  # New/undiscovered coins default to active
+
+    @staticmethod
+    def _build_rest_symbols(pairs_config: dict) -> list:
+        """Build list of base symbols for CoinGlass REST API (BTCUSDT -> BTC)."""
+        base_symbols = set()
+        all_pairs = pairs_config.get('primary', []) + pairs_config.get('secondary', [])
+        for pair in all_pairs:
+            for suffix in ("USDT", "USD", "BUSD", "USDC"):
+                if pair.endswith(suffix):
+                    base_symbols.add(pair[:-len(suffix)])
+                    break
+            else:
+                base_symbols.add(pair)
+        return sorted(base_symbols)
+
+    async def _on_oi_data(self, oi_snapshot):
+        """Callback: store OI snapshot in buffer + database."""
+        self.market_context_buffer.add_oi_snapshot(oi_snapshot)
+        try:
+            await self.db.save_oi_snapshot(
+                symbol=oi_snapshot.symbol,
+                current_oi_usd=oi_snapshot.current_oi_usd,
+                previous_oi_usd=oi_snapshot.previous_oi_usd,
+                oi_high_usd=oi_snapshot.oi_high_usd,
+                oi_low_usd=oi_snapshot.oi_low_usd,
+                oi_change_pct=oi_snapshot.oi_change_pct,
+            )
+        except Exception as e:
+            self.logger.debug(f"DB OI save error: {e}")
+
+    async def _on_funding_data(self, funding_snapshot):
+        """Callback: store funding snapshot in buffer + database."""
+        self.market_context_buffer.add_funding_snapshot(funding_snapshot)
+        try:
+            await self.db.save_funding_snapshot(
+                symbol=funding_snapshot.symbol,
+                current_rate=funding_snapshot.current_rate,
+                previous_rate=funding_snapshot.previous_rate,
+                rate_high=funding_snapshot.rate_high,
+                rate_low=funding_snapshot.rate_low,
+            )
+        except Exception as e:
+            self.logger.debug(f"DB funding save error: {e}")
 
     async def _on_signal_outcome(self, tracked, pnl_pct: float):
         """Callback: save signal outcome to database."""
@@ -539,7 +624,35 @@ class TeleglasPro:
                     self.logger.debug(f"Signal rejected: {reason}")
                     return
 
+                # Market context filter (OI + Funding Rate)
+                filter_result = self.market_context_filter.evaluate(trading_signal)
+
+                # Apply confidence adjustment from market context
+                if filter_result.confidence_adjustment != 0:
+                    trading_signal.confidence = max(50.0, min(
+                        trading_signal.confidence + filter_result.confidence_adjustment, 99.0
+                    ))
+
+                # Re-check confidence after adjustment (may drop below threshold)
+                if trading_signal.confidence < self.signal_validator.min_confidence:
+                    self.logger.debug(
+                        f"Signal dropped below threshold after context adjustment: "
+                        f"{trading_signal.confidence:.0f}%"
+                    )
+                    return
+
                 self.stats['signals_generated'] += 1
+
+                # Inject market context into metadata for message formatting
+                if filter_result.market_context:
+                    trading_signal.metadata['market_context'] = {
+                        'funding_rate': filter_result.market_context.current_funding_rate,
+                        'funding_alignment': filter_result.market_context.funding_alignment,
+                        'oi_usd': filter_result.market_context.current_oi_usd,
+                        'oi_change_1h_pct': filter_result.market_context.oi_change_1h_pct,
+                        'oi_alignment': filter_result.market_context.oi_alignment,
+                        'combined_assessment': filter_result.assessment,
+                    }
 
                 # Inject track record into metadata for message_formatter
                 track_record = self.signal_tracker.get_track_record(trading_signal.signal_type)
@@ -554,20 +667,26 @@ class TeleglasPro:
                     'symbol': symbol,
                     'type': trading_signal.signal_type,
                     'confidence': int(trading_signal.confidence),
-                    'description': f"{trading_signal.signal_type} detected"
+                    'description': f"{trading_signal.signal_type} detected",
+                    'market_context': filter_result.assessment,
                 })
 
-                # Check dashboard toggle: only send Telegram alert if coin is ACTIVE
-                if self._is_coin_active(symbol):
-                    # Format message
+                # Check dashboard toggle AND market context filter
+                if self._is_coin_active(symbol) and filter_result.passed:
                     formatted_message = self.message_formatter.format_signal(trading_signal)
-
-                    # Queue alert (sends to Telegram)
                     await self.alert_queue.add(
                         formatted_message,
                         priority=trading_signal.priority
                     )
-                    self.logger.info(f"🎯 Signal queued: {symbol} {trading_signal.signal_type}")
+                    self.logger.info(
+                        f"🎯 Signal queued: {symbol} {trading_signal.signal_type} "
+                        f"[context: {filter_result.assessment}]"
+                    )
+                elif not filter_result.passed:
+                    self.logger.info(
+                        f"📡 Signal filtered by market context: {symbol} "
+                        f"{trading_signal.signal_type} [{filter_result.assessment}]"
+                    )
                 else:
                     self.logger.info(f"🔇 Signal skipped (coin inactive): {symbol} {trading_signal.signal_type}")
 
@@ -650,6 +769,9 @@ class TeleglasPro:
                 'validator': self.signal_validator.get_stats(),
                 'confidence': self.confidence_scorer.get_overall_stats(),
                 'tracker': self.signal_tracker.get_stats(),
+                'market_context_buffer': self.market_context_buffer.get_stats(),
+                'market_context_filter': self.market_context_filter.get_stats(),
+                'rest_poller': self.rest_poller.get_stats(),
             }
 
             # Update dashboard
@@ -699,7 +821,7 @@ class TeleglasPro:
                     action = req["action"]
 
                     if action == "subscribe" and symbol not in self._trade_subscribed:
-                        trade_channel = f"futures_trades@all_{symbol}@0"
+                        trade_channel = f"futures_trades@all_{symbol}@10000"
                         subscribe_msg = {
                             "method": "subscribe",
                             "channels": [trade_channel]
@@ -710,7 +832,7 @@ class TeleglasPro:
                             self.logger.info(f"📡 Dashboard subscription: {trade_channel}")
 
                     elif action == "unsubscribe" and symbol in self._trade_subscribed:
-                        trade_channel = f"futures_trades@all_{symbol}@0"
+                        trade_channel = f"futures_trades@all_{symbol}@10000"
                         unsubscribe_msg = {
                             "method": "unsubscribe",
                             "channels": [trade_channel]
@@ -733,7 +855,7 @@ class TeleglasPro:
                     # Check if this coin has recent liquidation activity
                     liqs = self.buffer_manager.get_liquidations(symbol, time_window=300)
                     if len(liqs) >= 3:  # At least 3 liquidations in 5 min = worth subscribing
-                        trade_channel = f"futures_trades@all_{symbol}@0"
+                        trade_channel = f"futures_trades@all_{symbol}@10000"
                         subscribe_msg = {
                             "method": "subscribe",
                             "channels": [trade_channel]
@@ -790,6 +912,8 @@ class TeleglasPro:
                     if liq_vol > 0 or trade_vol > 0:
                         await self.db.save_baseline(symbol, liq_vol, trade_vol)
                 await self.db.cleanup_old_baselines(max_age_hours=72)
+                await self.db.cleanup_old_oi_snapshots(max_age_hours=168)
+                await self.db.cleanup_old_funding_snapshots(max_age_hours=168)
             except Exception as e:
                 self.logger.error(f"Baseline save error: {e}")
 
@@ -844,7 +968,8 @@ class TeleglasPro:
                 asyncio.create_task(self.stats_reporter()),
                 asyncio.create_task(self.cleanup_task()),
                 asyncio.create_task(self.signal_tracker_task()),
-                asyncio.create_task(self.dynamic_subscription_task())
+                asyncio.create_task(self.dynamic_subscription_task()),
+                asyncio.create_task(self.rest_poller.start(shutdown_event)),
             ]
             
             self.logger.info("=" * 60)
@@ -986,6 +1111,13 @@ def load_config() -> dict:
             'dashboard': {
                 'api_token': '',
                 'cors_origins': ['http://localhost:3000', 'http://localhost:8080']
+            },
+            'market_context': {
+                'enabled': True,
+                'poll_interval': 300,
+                'max_snapshots': 72,
+                'filter_mode': 'normal',
+                'confidence_adjust': True
             }
         }
     

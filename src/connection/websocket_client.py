@@ -10,6 +10,12 @@ Responsibilities:
 - Connection state management
 - Error handling
 - Event callbacks
+
+CoinGlass WebSocket API:
+- Base URL: wss://open-ws.coinglass.com/ws-api
+- Auth: API key as query parameter ?cg-api-key={key}
+- Heartbeat: send {"event": "ping"} every 20s, expect {"event": "pong"}
+- Subscribe: {"method": "subscribe", "channels": ["liquidationOrders"]}
 """
 
 import asyncio
@@ -110,20 +116,16 @@ class WebSocketClient:
                 if self._receive_task and not self._receive_task.done():
                     self._receive_task.cancel()
 
-                # Establish WebSocket connection
+                # Establish WebSocket connection with API key in URL
+                connect_url = f"{self.url}?cg-api-key={self.api_key}"
                 self.connection = await websockets.connect(
-                    self.url,
+                    connect_url,
                     ping_interval=None,  # We'll handle ping manually
                     close_timeout=10
                 )
 
-                # Authenticate
-                if not await self._authenticate():
-                    self.logger.error("Authentication failed")
-                    await self.disconnect()
-                    return False
-
                 self.state = ConnectionState.CONNECTED
+                self._is_authenticated = True
                 self._reconnect_attempts = 0
                 self.logger.info("✅ Connected successfully")
 
@@ -232,50 +234,6 @@ class WebSocketClient:
             
         except Exception as e:
             self.logger.error(f"Failed to send message: {e}")
-            return False
-    
-    async def _authenticate(self) -> bool:
-        """
-        Authenticate with CoinGlass API
-        
-        Returns:
-            True if authenticated, False otherwise
-        """
-        try:
-            # Send authentication message
-            auth_message = {
-                "event": "login",
-                "params": {
-                    "apiKey": self.api_key
-                }
-            }
-            
-            await self.connection.send(json.dumps(auth_message))
-            self.logger.info("Sent authentication request")
-            
-            # Wait for authentication response
-            response = await asyncio.wait_for(
-                self.connection.recv(),
-                timeout=10
-            )
-            
-            data = json.loads(response)
-            self.logger.debug(f"Auth response: {data}")
-            
-            # Check if authentication successful
-            if data.get("event") == "login" and data.get("code") == 0:
-                self._is_authenticated = True
-                self.logger.info("✅ Authentication successful")
-                return True
-            else:
-                self.logger.error(f"Authentication failed: {data}")
-                return False
-                
-        except asyncio.TimeoutError:
-            self.logger.error("Authentication timeout")
-            return False
-        except Exception as e:
-            self.logger.error(f"Authentication error: {e}")
             return False
     
     async def _receive_loop(self):

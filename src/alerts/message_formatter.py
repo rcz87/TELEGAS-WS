@@ -110,12 +110,15 @@ class MessageFormatter:
             zone_spread = abs(price_zone[1] - price_zone[0]) if price_zone[1] > 0 else 0
             is_short_hunt = "SHORT" in str(metadata.get('direction', ''))
 
+            # Use small fraction of price as minimum risk (handles all price scales)
+            min_risk = max(price_zone[1] * 0.001, 1e-10)
+
             if is_short_hunt:
                 # Longs got stopped, price akan naik → LONG entry
                 entry_low = price_zone[1]
                 entry_high = price_zone[1] + (zone_spread * 0.1)
                 sl = price_zone[0] - (zone_spread * 0.3)
-                risk = max(entry_low - sl, 1)
+                risk = max(entry_low - sl, min_risk)
                 target1 = entry_low + (risk * 2)
                 target2 = entry_low + (risk * 3)
             else:
@@ -123,11 +126,11 @@ class MessageFormatter:
                 entry_high = price_zone[1]
                 entry_low = price_zone[1] - (zone_spread * 0.1)
                 sl = price_zone[1] + (zone_spread * 0.3)
-                risk = max(sl - entry_high, 1)
+                risk = max(sl - entry_high, min_risk)
                 target1 = entry_high - (risk * 2)
                 target2 = entry_high - (risk * 3)
 
-            entry_mid = (entry_low + entry_high) / 2 if entry_low > 0 else 1
+            entry_mid = (entry_low + entry_high) / 2 if entry_low > 0 else min_risk
             t1_pct = abs(target1 - entry_mid) / entry_mid * 100
             t2_pct = abs(target2 - entry_mid) / entry_mid * 100
             risk_pct = risk / entry_mid * 100
@@ -143,20 +146,21 @@ class MessageFormatter:
             if track.get('total', 0) > 0:
                 track_line = f"\n📈 *Track Record*: {track['wins']}W/{track['losses']}L ({track['win_rate']:.0f}%)"
 
+            fp = self.format_price
             message = f"""{priority_emoji} *STOP HUNT DETECTED* - {signal.symbol}
 
 📊 *Liquidations*: ${metadata.get('total_volume', 0)/1_000_000:.1f}M cleared
 • Direction: {direction}
 • Count: {metadata.get('liquidation_count', 0)} liquidations
-• Zone: ${price_zone[0]:,.0f} - ${price_zone[1]:,.0f}
+• Zone: {fp(price_zone[0])} - {fp(price_zone[1])}
 
 🐋 *Whale Absorption*: ${absorption_vol/1_000:.0f}K ({absorption_pct:.0f}% of cascade)
 
 💡 *TRADING SETUP* {'📈 LONG' if is_short_hunt else '📉 SHORT'}
-Entry: ${entry_low:,.0f} - ${entry_high:,.0f}
-Stop Loss: ${sl:,.0f} ({risk_pct:.1f}% risk)
-Target 1: ${target1:,.0f} ({'+' if is_short_hunt else '-'}{t1_pct:.1f}%) R:R 1:2
-Target 2: ${target2:,.0f} ({'+' if is_short_hunt else '-'}{t2_pct:.1f}%) R:R 1:3{track_line}
+Entry: {fp(entry_low)} - {fp(entry_high)}
+Stop Loss: {fp(sl)} ({risk_pct:.1f}% risk)
+Target 1: {fp(target1)} ({'+' if is_short_hunt else '-'}{t1_pct:.1f}%) R:R 1:2
+Target 2: {fp(target2)} ({'+' if is_short_hunt else '-'}{t2_pct:.1f}%) R:R 1:3{track_line}{self.format_market_context_section(signal.metadata)}
 
 🎯 Confidence: {signal.confidence:.0f}%
 ⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
@@ -235,13 +239,13 @@ Sell Volume: ${sell_vol/1000:.0f}K ({sell_pct:.0f}%)
 
 📊 Net Delta: ${net_delta/1000:+.0f}K ({delta_label})
 
-💡 Signal: Strong {'accumulation' if signal.signal_type == 'ACCUMULATION' else 'distribution'}
+💡 Signal: Strong {'accumulation' if signal.signal_type == 'ACCUMULATION' else 'distribution'}{self.format_market_context_section(signal.metadata)}
 
 🎯 Confidence: {signal.confidence:.0f}%
 ⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
-            
+
             return message
-            
+
         except Exception as e:
             self.logger.error(f"Order flow formatting failed: {e}")
             return self.format_generic(signal)
@@ -308,6 +312,63 @@ Type: {getattr(signal, 'signal_type', 'Unknown')}
 
 Please check logs for details."""
     
+    def format_market_context_section(self, metadata: dict) -> str:
+        """
+        Format market context (OI + funding) section for Telegram message.
+
+        Returns empty string if no market context data available.
+        """
+        ctx = metadata.get('market_context')
+        if not ctx:
+            return ""
+
+        funding_rate = ctx.get('funding_rate', 0)
+        funding_pct = funding_rate * 100
+        funding_align = ctx.get('funding_alignment', 'N/A')
+        oi_usd = ctx.get('oi_usd', 0)
+        oi_change = ctx.get('oi_change_1h_pct', 0)
+        oi_align = ctx.get('oi_alignment', 'N/A')
+        assessment = ctx.get('combined_assessment', 'NEUTRAL')
+
+        # Assessment emoji
+        assess_emoji = {"FAVORABLE": "✅", "UNFAVORABLE": "⚠️"}.get(assessment, "➖")
+        fund_emoji = {"FAVORABLE": "✅", "CAUTION": "⚠️"}.get(funding_align, "➖")
+        oi_emoji = {"CONFIRMATION": "✅", "WEAK": "⚠️", "SQUEEZE_RISK": "⚠️"}.get(oi_align, "➖")
+
+        # Format OI value (billions or millions)
+        if oi_usd >= 1_000_000_000:
+            oi_str = f"${oi_usd / 1_000_000_000:.1f}B"
+        elif oi_usd >= 1_000_000:
+            oi_str = f"${oi_usd / 1_000_000:.0f}M"
+        else:
+            oi_str = f"${oi_usd / 1_000:.0f}K"
+
+        return f"""
+📡 *Market Context* {assess_emoji}
+• Funding: {funding_pct:+.4f}% {fund_emoji} {funding_align}
+• OI: {oi_str} ({oi_change:+.1f}% 1h) {oi_emoji} {oi_align}"""
+
+    @staticmethod
+    def format_price(price: float) -> str:
+        """
+        Format price smartly based on magnitude.
+
+        BTC $96,200  |  ETH $3,450  |  DOGE $0.1823  |  PEPE $0.00001182
+        """
+        abs_price = abs(price)
+        if abs_price == 0:
+            return "$0"
+        elif abs_price >= 1000:
+            return f"${price:,.0f}"
+        elif abs_price >= 1:
+            return f"${price:,.2f}"
+        elif abs_price >= 0.01:
+            return f"${price:.4f}"
+        elif abs_price >= 0.0001:
+            return f"${price:.6f}"
+        else:
+            return f"${price:.8f}"
+
     def get_priority_emoji(self, priority: int) -> str:
         """
         Get emoji based on priority

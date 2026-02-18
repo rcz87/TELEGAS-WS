@@ -104,10 +104,35 @@ class Database:
                 recorded_at REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS oi_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                current_oi_usd REAL NOT NULL,
+                previous_oi_usd REAL,
+                oi_high_usd REAL,
+                oi_low_usd REAL,
+                oi_change_pct REAL,
+                recorded_at REAL NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS funding_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                current_rate REAL NOT NULL,
+                previous_rate REAL,
+                rate_high REAL,
+                rate_low REAL,
+                recorded_at REAL NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol);
             CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
             CREATE INDEX IF NOT EXISTS idx_signals_outcome ON signals(outcome);
             CREATE INDEX IF NOT EXISTS idx_baselines_symbol ON hourly_baselines(symbol);
+            CREATE INDEX IF NOT EXISTS idx_oi_symbol ON oi_snapshots(symbol);
+            CREATE INDEX IF NOT EXISTS idx_oi_recorded ON oi_snapshots(recorded_at);
+            CREATE INDEX IF NOT EXISTS idx_funding_symbol ON funding_snapshots(symbol);
+            CREATE INDEX IF NOT EXISTS idx_funding_recorded ON funding_snapshots(recorded_at);
         """)
         await self._db.commit()
 
@@ -331,6 +356,89 @@ class Database:
             writer.writerow([row_dict.get(col, "") for col in columns])
 
         return output.getvalue()
+
+    # ==========================================================================
+    # OI SNAPSHOTS
+    # ==========================================================================
+
+    async def save_oi_snapshot(self, symbol: str, current_oi_usd: float,
+                               previous_oi_usd: float = 0,
+                               oi_high_usd: float = 0,
+                               oi_low_usd: float = 0,
+                               oi_change_pct: float = 0):
+        """Save OI snapshot from CoinGlass v4 OHLC candle data."""
+        self._ensure_connected()
+        await self._db.execute(
+            """INSERT INTO oi_snapshots
+               (symbol, current_oi_usd, previous_oi_usd, oi_high_usd,
+                oi_low_usd, oi_change_pct, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (symbol, current_oi_usd, previous_oi_usd, oi_high_usd,
+             oi_low_usd, oi_change_pct, time.time())
+        )
+        await self._db.commit()
+
+    async def get_oi_history(self, symbol: str, hours: int = 24) -> List[dict]:
+        """Get OI history for a symbol."""
+        self._ensure_connected()
+        cutoff = time.time() - (hours * 3600)
+        cursor = await self._db.execute(
+            """SELECT * FROM oi_snapshots
+               WHERE symbol = ? AND recorded_at > ?
+               ORDER BY recorded_at""",
+            (symbol, cutoff)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def cleanup_old_oi_snapshots(self, max_age_hours: int = 168):
+        """Remove OI snapshots older than max_age_hours (default 7 days)."""
+        self._ensure_connected()
+        cutoff = time.time() - (max_age_hours * 3600)
+        await self._db.execute(
+            "DELETE FROM oi_snapshots WHERE recorded_at < ?", (cutoff,)
+        )
+        await self._db.commit()
+
+    # ==========================================================================
+    # FUNDING SNAPSHOTS
+    # ==========================================================================
+
+    async def save_funding_snapshot(self, symbol: str, current_rate: float,
+                                     previous_rate: float = 0,
+                                     rate_high: float = 0,
+                                     rate_low: float = 0):
+        """Save funding rate snapshot from CoinGlass v4 OHLC candle data."""
+        self._ensure_connected()
+        await self._db.execute(
+            """INSERT INTO funding_snapshots
+               (symbol, current_rate, previous_rate, rate_high, rate_low, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (symbol, current_rate, previous_rate, rate_high, rate_low, time.time())
+        )
+        await self._db.commit()
+
+    async def get_funding_history(self, symbol: str, hours: int = 24) -> List[dict]:
+        """Get funding rate history for a symbol."""
+        self._ensure_connected()
+        cutoff = time.time() - (hours * 3600)
+        cursor = await self._db.execute(
+            """SELECT * FROM funding_snapshots
+               WHERE symbol = ? AND recorded_at > ?
+               ORDER BY recorded_at""",
+            (symbol, cutoff)
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    async def cleanup_old_funding_snapshots(self, max_age_hours: int = 168):
+        """Remove funding snapshots older than max_age_hours (default 7 days)."""
+        self._ensure_connected()
+        cutoff = time.time() - (max_age_hours * 3600)
+        await self._db.execute(
+            "DELETE FROM funding_snapshots WHERE recorded_at < ?", (cutoff,)
+        )
+        await self._db.commit()
 
     async def export_baselines_csv(self, symbol: str = None) -> str:
         """Export baselines to CSV string."""

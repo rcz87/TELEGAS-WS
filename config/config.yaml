@@ -116,6 +116,14 @@ monitoring:
   # Max concurrent analysis tasks (resource management)
   max_concurrent_analysis: 30
 
+# Market Context (OI + Funding Rate from CoinGlass REST API)
+market_context:
+  enabled: true
+  poll_interval: 300             # Seconds between REST API polls (5 minutes)
+  max_snapshots: 72              # Rolling buffer size per symbol (6 hours at 5-min)
+  filter_mode: "normal"          # "strict" = only FAVORABLE, "normal" = block UNFAVORABLE, "permissive" = pass all
+  confidence_adjust: true        # Adjust confidence based on market context
+
 # Analysis Windows
 analysis:
   stop_hunt_window: 30           # Seconds
