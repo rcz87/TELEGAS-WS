@@ -226,6 +226,9 @@ class TeleglasPro:
             monitoring_config=monitoring_config,
         )
 
+        # Dedup: prevent duplicate REST signals to Telegram (cooldown per signal key)
+        self._rest_signal_cooldown: dict = {}  # key → last_sent_timestamp
+
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
         self.telegram_bot = None
@@ -767,24 +770,42 @@ class TeleglasPro:
         except Exception as e:
             self.logger.error(f"State save error: {e}")
 
+    def _rest_signal_dedup(self, symbol: str, signal_type: str, direction: str,
+                           cooldown_seconds: int = 300) -> bool:
+        """Check if this signal was already sent recently. Returns True if OK to send."""
+        key = f"{symbol}_{signal_type}_{direction}"
+        now = time.time()
+        last = self._rest_signal_cooldown.get(key, 0)
+        if now - last < cooldown_seconds:
+            return False  # duplicate within cooldown
+        self._rest_signal_cooldown[key] = now
+        # Cleanup old entries
+        if len(self._rest_signal_cooldown) > 200:
+            cutoff = now - 600
+            self._rest_signal_cooldown = {
+                k: v for k, v in self._rest_signal_cooldown.items() if v > cutoff
+            }
+        return True
+
     async def _scan_rest_signals(self):
         """Scan all tracked symbols for REST-based signals (CVD flip, OI spike, whale)."""
         try:
-            # Get symbols that have REST data
             buffer_stats = self.market_context_buffer.get_stats()
-            oi_count = buffer_stats.get("oi_symbols_tracked", 0)
-            if oi_count == 0:
-                return  # No REST data yet
+            if buffer_stats.get("oi_symbols_tracked", 0) == 0:
+                return
 
-            # Scan symbols from REST poller
-            for base_symbol in self.rest_poller.symbols[:50]:  # limit to 50 per cycle
+            for base_symbol in self.rest_poller.symbols[:50]:
                 symbol = f"{base_symbol}USDT" if not base_symbol.endswith("USDT") else base_symbol
 
                 signal = self.rest_signal_detector.evaluate(base_symbol)
                 if not signal:
                     continue
 
-                # Push to dashboard
+                # Dedup check — skip if same signal sent within 5 minutes
+                if not self._rest_signal_dedup(symbol, signal.signal_type, signal.direction):
+                    continue
+
+                # Push to dashboard + lifecycle
                 signal_dict = {
                     "symbol": symbol,
                     "type": signal.signal_type,
@@ -795,10 +816,7 @@ class TeleglasPro:
                     "leading_label": " + ".join(signal.sources),
                 }
                 dashboard_api.add_signal(signal_dict)
-
-                # Register with lifecycle manager
                 self.lifecycle.ingest(signal_dict)
-
                 self.stats["signals_generated"] += 1
 
                 self.logger.info(
@@ -806,22 +824,17 @@ class TeleglasPro:
                     f"conf={signal.confidence:.0f}% sources={signal.sources}"
                 )
 
-                # Telegram alert gate — quality checks before sending
+                # Telegram gate: confidence + active coin + CVD veto + dedup
                 send_telegram = signal.confidence >= 70 and self._is_coin_active(symbol)
 
                 if send_telegram:
-                    # CVD VETO: don't send LONG if SpotCVD cumulative negative
                     spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
                     if spot_cvd and signal.direction == "LONG" and spot_cvd.cvd_latest < 0:
                         send_telegram = False
-                        self.logger.info(
-                            f"CVD VETO {symbol}: LONG blocked — SpotCVD cumulative negative ({spot_cvd.cvd_latest:,.0f})"
-                        )
+                        self.logger.info(f"CVD VETO {symbol}: LONG blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
                     elif spot_cvd and signal.direction == "SHORT" and spot_cvd.cvd_latest > 0:
                         send_telegram = False
-                        self.logger.info(
-                            f"CVD VETO {symbol}: SHORT blocked — SpotCVD cumulative positive ({spot_cvd.cvd_latest:,.0f})"
-                        )
+                        self.logger.info(f"CVD VETO {symbol}: SHORT blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
 
                 if send_telegram:
                     try:

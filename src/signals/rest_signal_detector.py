@@ -65,6 +65,9 @@ class RestSignalDetector:
         self._prev_spot_dir: Dict[str, str] = {}
         self._prev_fut_dir: Dict[str, str] = {}
 
+        # Track previous whale net to detect changes (avoid static repeats)
+        self._prev_whale_net: Dict[str, float] = {}  # symbol → last net_long - net_short
+
     def _get_tier(self, symbol: str) -> str:
         if symbol in self._tier1:
             return "t1"
@@ -217,7 +220,7 @@ class RestSignalDetector:
     # ── Whale Activity Detection ────────────────────────────────────
 
     def check_whale_activity(self, symbol: str) -> Optional[RestSignal]:
-        """Check for significant whale net flow."""
+        """Check for significant whale net flow. Only triggers on CHANGED state."""
         whale_positions = self.buffer.get_whale_positions(symbol)
         if not whale_positions:
             return None
@@ -239,6 +242,19 @@ class RestSignalDetector:
         total_flow = net_long + net_short
         if total_flow < WHALE_MIN_FLOW:
             return None
+
+        # Check if whale state actually changed since last check
+        current_net = net_long - net_short
+        prev_net = self._prev_whale_net.get(symbol, None)
+        self._prev_whale_net[symbol] = current_net
+
+        if prev_net is not None:
+            # Only trigger if net changed significantly (>10% or direction flipped)
+            prev_dir = "LONG" if prev_net > 0 else "SHORT"
+            curr_dir = "LONG" if current_net > 0 else "SHORT"
+            net_change_pct = abs(current_net - prev_net) / max(abs(prev_net), 1) * 100
+            if prev_dir == curr_dir and net_change_pct < 10:
+                return None  # Same whale state, skip
 
         dominance = max(net_long, net_short) / total_flow
         if dominance < WHALE_MIN_DOMINANCE:
