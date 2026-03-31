@@ -65,6 +65,7 @@ from src.ml.dataset_builder import DatasetBuilder
 from src.ml.calibration import CalibrationTable
 from src.ml.model_trainer import ModelTrainer
 from src.ml.ml_inference import MLInferenceEngine
+from src.ml.guardrails import MLGuardrails
 from src.signals.signal_lifecycle import SignalLifecycleManager
 
 # Global flag for shutdown
@@ -212,6 +213,7 @@ class TeleglasPro:
             mode=ml_config.get('mode', 'shadow'),
             ml_weight=ml_config.get('weight', 0.3),
         )
+        self.ml_guardrails = MLGuardrails()
 
         # Signal lifecycle (expiry, primary selection, anti-flip)
         lifecycle_expiry = config.get('signal_lifecycle', {}).get('expiry', {})
@@ -625,6 +627,12 @@ class TeleglasPro:
                         mae_pct=result.mae_pct,
                         excursion_ratio=result.excursion_ratio,
                         time_to_resolution=result.time_to_resolution,
+                    )
+
+                # Track ML-scored outcome for guardrail monitoring
+                if tracked.outcome in ("WIN", "LOSS", "PARTIAL"):
+                    self.ml_guardrails.record_ml_outcome(
+                        tracked.outcome in ("WIN", "PARTIAL")
                     )
         except Exception as e:
             self.logger.debug(f"DB outcome save error: {e}")
@@ -1104,11 +1112,18 @@ class TeleglasPro:
                                     f"conf={ml_result['ml_confidence']:.0f}% "
                                     f"rule={trading_signal.confidence:.0f}%"
                                 )
-                                # In blended mode, adjust confidence
+                                # In blended mode: guardrail check → blend → clamp
                                 if self.ml_engine.mode == "blended":
-                                    trading_signal.confidence = self.ml_engine.blend_score(
-                                        trading_signal.confidence, ml_result
-                                    )
+                                    model_meta = ModelTrainer.get_latest_meta()
+                                    allowed, gate_reason = self.ml_guardrails.should_allow_blended(model_meta)
+                                    if allowed:
+                                        rule_conf = trading_signal.confidence
+                                        raw_blended = self.ml_engine.blend_score(rule_conf, ml_result)
+                                        trading_signal.confidence = self.ml_guardrails.clamp_adjustment(
+                                            rule_conf, raw_blended
+                                        )
+                                    else:
+                                        self.logger.info(f"ML blended blocked: {gate_reason}")
                     except Exception:
                         pass  # Feature logging + ML scoring is non-critical
 
@@ -1176,6 +1191,7 @@ class TeleglasPro:
                 'feature_logger': self.feature_logger.get_stats(),
                 'lifecycle': self.lifecycle.get_stats(),
                 'ml_inference': self.ml_engine.get_stats(),
+                'ml_guardrails': self.ml_guardrails.get_stats(),
             }
 
             # Update dashboard
