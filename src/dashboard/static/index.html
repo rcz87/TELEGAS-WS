@@ -182,6 +182,46 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 .w-action.close{background:var(--border);color:var(--text3);}
 .no-data{color:var(--border2);text-align:center;padding:12px;font-size:11px;}
 
+/* ===== SIGNAL LIFECYCLE PANEL ===== */
+.sig-panel{padding:0 16px 10px;}
+.sig-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;}
+.sig-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.sig-title{font-size:10px;color:var(--blue);text-transform:uppercase;letter-spacing:.8px;font-weight:bold;}
+.sig-count{font-size:9px;color:var(--text3);}
+.sig-primary{background:var(--bg);border-radius:6px;padding:10px 12px;margin-bottom:6px;border-left:3px solid var(--blue);position:relative;}
+.sig-primary.long{border-left-color:var(--green);}
+.sig-primary.short{border-left-color:var(--red);}
+.sig-primary.weakening{opacity:0.7;}
+.sig-primary.expired{opacity:0.4;border-left-color:var(--text4);}
+.sig-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;}
+.sig-dir{font-size:13px;font-weight:bold;}
+.sig-dir.long{color:var(--green);}.sig-dir.short{color:var(--red);}
+.sig-status{font-size:9px;padding:2px 8px;border-radius:10px;font-weight:bold;}
+.sig-status.active{background:var(--green-bg);color:var(--green);}
+.sig-status.weakening{background:var(--yellow-bg);color:var(--yellow);}
+.sig-status.expired{background:var(--border);color:var(--text4);}
+.sig-status.superseded{background:var(--red-bg);color:var(--red);}
+.sig-status.new{background:var(--blue-bg);color:var(--blue);}
+.sig-meta{display:flex;gap:12px;font-size:10px;color:var(--text3);margin-bottom:4px;flex-wrap:wrap;}
+.sig-meta .val{color:var(--text);font-weight:bold;}
+.sig-expiry-bar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px;}
+.sig-expiry-fill{height:100%;border-radius:2px;transition:width 1s linear;}
+.sig-expiry-fill.fresh{background:var(--green);}
+.sig-expiry-fill.aging{background:var(--yellow);}
+.sig-expiry-fill.dying{background:var(--red);}
+.sig-reason{font-size:9px;color:var(--text4);margin-top:3px;font-style:italic;}
+.sig-history{margin-top:6px;}
+.sig-hist-label{font-size:9px;color:var(--text4);margin-bottom:3px;}
+.sig-hist-row{display:flex;justify-content:space-between;align-items:center;font-size:10px;padding:3px 6px;background:var(--bg);border-radius:4px;margin-bottom:2px;opacity:0.6;}
+.sig-hist-row .dir{font-weight:bold;}
+.sig-hist-row .dir.long{color:var(--green);}.sig-hist-row .dir.short{color:var(--red);}
+.sig-active-list{margin-top:8px;}
+.sig-active-row{display:flex;justify-content:space-between;align-items:center;font-size:10px;padding:4px 8px;background:var(--bg);border-radius:4px;margin-bottom:3px;cursor:pointer;border:1px solid transparent;transition:border-color .15s;}
+.sig-active-row:hover{border-color:var(--blue);}
+.sig-active-row .sym{font-weight:bold;color:var(--text);width:70px;}
+.sig-active-row .dir{font-weight:bold;font-size:9px;}
+.sig-active-row .score{font-size:9px;color:var(--text2);}
+
 /* Whale insight */
 .wh-insight{font-size:10px;color:var(--text2);padding:6px 10px;background:var(--bg);border-radius:6px;border-left:3px solid #8b5cf6;line-height:1.4;margin-top:6px;}
 .wh-insight .key{color:var(--text);font-weight:bold;}
@@ -569,6 +609,20 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 
     <!-- AI Insight -->
     <div class="wh-insight" id="wh-insight">Waiting for whale data...</div>
+  </div>
+</div>
+
+<!-- ===== 7.5 SIGNAL LIFECYCLE PANEL ===== -->
+<div class="sig-panel">
+  <div class="sig-card">
+    <div class="sig-hdr">
+      <span class="sig-title">SIGNAL INTELLIGENCE</span>
+      <span class="sig-count" id="sig-count">0 active</span>
+    </div>
+    <!-- Primary signal for selected coin -->
+    <div id="sig-primary-box"></div>
+    <!-- All active signals across coins -->
+    <div class="sig-active-list" id="sig-active-list"></div>
   </div>
 </div>
 
@@ -1841,6 +1895,112 @@ function connect(){
 }
 setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping');},15000);
 connect();
+
+// ── Signal Lifecycle Panel ─────────────────
+let sigData={primary:null,recent:[],active:[]};
+
+function fmtAge(sec){
+  if(sec<60)return Math.round(sec)+'s';
+  if(sec<3600)return Math.round(sec/60)+'m';
+  return (sec/3600).toFixed(1)+'h';
+}
+
+function sigStatusClass(s){return(s||'').toLowerCase();}
+
+function buildPrimarySignal(sig){
+  if(!sig)return'<div class="no-data">No active signal for this coin</div>';
+  const dirCls=sig.direction==='LONG'?'long':'short';
+  const statusCls=sigStatusClass(sig.status);
+  const fresh=sig.freshness||0;
+  const fillCls=fresh>0.6?'fresh':fresh>0.3?'aging':'dying';
+  const fillPct=Math.round(fresh*100);
+  let html=`<div class="sig-primary ${dirCls} ${statusCls}">`;
+  html+=`<div class="sig-top">`;
+  html+=`<span class="sig-dir ${dirCls}">${sig.signal_type} ${sig.direction}</span>`;
+  html+=`<span class="sig-status ${statusCls}">${sig.status}</span>`;
+  html+=`</div>`;
+  html+=`<div class="sig-meta">`;
+  html+=`<span>Confidence <span class="val">${sig.confidence}%</span></span>`;
+  html+=`<span>Score <span class="val">${sig.effective_score}</span></span>`;
+  html+=`<span>Age <span class="val">${fmtAge(sig.age_seconds)}</span></span>`;
+  html+=`<span>Expires <span class="val">${fmtAge(sig.remaining_seconds)}</span></span>`;
+  if(sig.market_context)html+=`<span>Context <span class="val">${sig.market_context}</span></span>`;
+  if(sig.leading_label)html+=`<span>${sig.leading_label}</span>`;
+  html+=`</div>`;
+  html+=`<div class="sig-expiry-bar"><div class="sig-expiry-fill ${fillCls}" style="width:${fillPct}%"></div></div>`;
+  if(sig.invalidation_reason)html+=`<div class="sig-reason">${sig.invalidation_reason.replace(/_/g,' ')}</div>`;
+  html+=`</div>`;
+  return html;
+}
+
+function buildSignalHistory(recent){
+  if(!recent||!recent.length)return'';
+  let html='<div class="sig-history"><div class="sig-hist-label">RECENT</div>';
+  recent.slice(0,5).forEach(s=>{
+    const dirCls=s.direction==='LONG'?'long':'short';
+    html+=`<div class="sig-hist-row">`;
+    html+=`<span class="dir ${dirCls}">${s.signal_type} ${s.direction}</span>`;
+    html+=`<span>${s.confidence}%</span>`;
+    html+=`<span class="sig-status ${sigStatusClass(s.status)}" style="font-size:8px;padding:1px 5px;">${s.status}</span>`;
+    html+=`<span style="color:var(--text4)">${fmtAge(s.age_seconds)} ago</span>`;
+    html+=`</div>`;
+  });
+  html+='</div>';
+  return html;
+}
+
+function buildActiveList(signals){
+  if(!signals||!signals.length)return'';
+  let html='<div style="font-size:9px;color:var(--text4);margin-bottom:3px;">ALL ACTIVE SIGNALS</div>';
+  signals.forEach(s=>{
+    const dirCls=s.direction==='LONG'?'long':'short';
+    const sym=s.symbol.replace('USDT','');
+    html+=`<div class="sig-active-row" onclick="selectCoin('${sym}')">`;
+    html+=`<span class="sym">${sym}</span>`;
+    html+=`<span class="dir ${dirCls}">${s.direction}</span>`;
+    html+=`<span>${s.signal_type}</span>`;
+    html+=`<span class="score">${s.confidence}% → ${s.effective_score}</span>`;
+    html+=`<span style="color:var(--text4)">${fmtAge(s.remaining_seconds)}</span>`;
+    html+=`</div>`;
+  });
+  return html;
+}
+
+function renderSignalPanel(){
+  document.getElementById('sig-primary-box').innerHTML=
+    buildPrimarySignal(sigData.primary)+buildSignalHistory(sigData.recent);
+  document.getElementById('sig-active-list').innerHTML=buildActiveList(sigData.active);
+  const n=sigData.active?sigData.active.length:0;
+  document.getElementById('sig-count').textContent=n+' active';
+}
+
+async function fetchSignalLifecycle(){
+  try{
+    const base=location.pathname.replace(/\/+$/,'');
+    const sym=rightCoin+'USDT';
+    const [primaryRes,activeRes]=await Promise.all([
+      fetch(base+'/api/signals/primary/'+sym),
+      fetch(base+'/api/signals/active'),
+    ]);
+    if(primaryRes.ok){
+      const data=await primaryRes.json();
+      sigData.primary=data.primary;
+      sigData.recent=data.recent||[];
+    }
+    if(activeRes.ok){
+      const data=await activeRes.json();
+      sigData.active=data.signals||[];
+    }
+    renderSignalPanel();
+  }catch(e){}
+}
+
+// Fetch every 10 seconds
+setInterval(fetchSignalLifecycle,10000);
+fetchSignalLifecycle();
+// Also refresh on coin change (hook into render cycle)
+const _origRender=render;
+render=function(state){_origRender(state);setTimeout(fetchSignalLifecycle,300);};
 
 // PWA
 if('serviceWorker' in navigator){navigator.serviceWorker.register('static/sw.js').catch(()=>{});}
