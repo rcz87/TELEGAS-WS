@@ -728,9 +728,9 @@ class TeleglasPro:
             # Share DB reference with dashboard for export endpoints
             dashboard_api._db = self.db
 
-            # Share ML + lifecycle with dashboard API for endpoints
-            dashboard_api._state_manager._calibration = self.calibration
-            dashboard_api._state_manager._lifecycle = self.lifecycle
+            # Share lifecycle + calibration with dashboard API for endpoints
+            dashboard_api.set_lifecycle(self.lifecycle)
+            dashboard_api.set_calibration(self.calibration)
 
         except Exception as e:
             self.logger.error(f"Database init error: {e} (continuing without persistence)")

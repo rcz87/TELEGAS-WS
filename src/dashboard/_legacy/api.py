@@ -390,34 +390,41 @@ async def get_signal_stats(_auth=Depends(verify_token)):
 @app.get("/api/calibration")
 async def get_calibration(_rl=Depends(check_rate_limit)):
     """Get confidence score calibration table (score bucket → observed win rate)."""
-    # Access calibration from main.py via a module-level reference
-    cal = getattr(_state_manager, '_calibration', None)
-    if cal:
-        return {"table": cal.get_table(), "stats": cal.get_stats()}
+    if _calibration_ref:
+        return {"table": _calibration_ref.get_table(), "stats": _calibration_ref.get_stats()}
     return {"table": [], "stats": {"total_signals": 0, "note": "calibration not yet built"}}
+
+# Module-level references set by main.py (avoids underscore export issue)
+_lifecycle_ref = None
+_calibration_ref = None
+
+def set_lifecycle(lc):
+    global _lifecycle_ref
+    _lifecycle_ref = lc
+
+def set_calibration(cal):
+    global _calibration_ref
+    _calibration_ref = cal
 
 @app.get("/api/signals/active")
 async def get_active_signals(_rl=Depends(check_rate_limit)):
     """Get all alive primary signals with lifecycle state (sorted by effective score)."""
-    lc = getattr(_state_manager, '_lifecycle', None)
-    if lc:
-        return {"signals": lc.get_active_signals()}
+    if _lifecycle_ref:
+        return {"signals": _lifecycle_ref.get_active_signals()}
     return {"signals": []}
 
 @app.get("/api/signals/primary/{symbol}")
 async def get_primary_signal(symbol: str, _rl=Depends(check_rate_limit)):
     """Get current primary signal + recent history for a coin."""
-    lc = getattr(_state_manager, '_lifecycle', None)
-    if not lc:
+    if not _lifecycle_ref:
         return {"symbol": symbol, "primary": None, "recent": []}
-    return lc.get_coin_state(symbol.upper())
+    return _lifecycle_ref.get_coin_state(symbol.upper())
 
 @app.get("/api/signals/lifecycle")
 async def get_lifecycle_overview(_rl=Depends(check_rate_limit)):
     """Get lifecycle state for all coins with active signals."""
-    lc = getattr(_state_manager, '_lifecycle', None)
-    if lc:
-        return {"coins": lc.get_all_coin_states(), "stats": lc.get_stats()}
+    if _lifecycle_ref:
+        return {"coins": _lifecycle_ref.get_all_coin_states(), "stats": _lifecycle_ref.get_stats()}
     return {"coins": {}, "stats": {}}
 
 @app.get("/api/signals/history")

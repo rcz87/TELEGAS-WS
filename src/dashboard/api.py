@@ -29,4 +29,6 @@ from api import (  # explicit re-exports for clarity
     broadcast_update,
     verify_token,
     active_connections,
+    set_lifecycle,
+    set_calibration,
 )
