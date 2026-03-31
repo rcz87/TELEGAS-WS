@@ -63,6 +63,8 @@ from src.signals.setup_classifier import classify_setup
 from src.signals.feature_logger import FeatureLogger
 from src.ml.dataset_builder import DatasetBuilder
 from src.ml.calibration import CalibrationTable
+from src.ml.model_trainer import ModelTrainer
+from src.ml.ml_inference import MLInferenceEngine
 from src.signals.signal_lifecycle import SignalLifecycleManager
 
 # Global flag for shutdown
@@ -202,6 +204,14 @@ class TeleglasPro:
         # ML components
         self.dataset_builder = DatasetBuilder()
         self.calibration = CalibrationTable()
+        self.model_trainer = ModelTrainer()
+
+        # ML inference (shadow mode by default — logs score, doesn't affect alerts)
+        ml_config = config.get('ml', {})
+        self.ml_engine = MLInferenceEngine(
+            mode=ml_config.get('mode', 'shadow'),
+            ml_weight=ml_config.get('weight', 0.3),
+        )
 
         # Signal lifecycle (expiry, primary selection, anti-flip)
         lifecycle_expiry = config.get('signal_lifecycle', {}).get('expiry', {})
@@ -627,9 +637,13 @@ class TeleglasPro:
             # Share DB with feature logger + ML components
             self.feature_logger.set_db(self.db)
             self.dataset_builder.set_db(self.db)
+            self.model_trainer.set_db(self.db)
 
             # Build calibration table from existing history
             await self.calibration.build_from_db(self.db)
+
+            # Load latest ML model if available
+            self.ml_engine.load_model()
 
             # Restore confidence scorer state (signal-type level)
             saved_confidence = await self.db.load_confidence_state()
@@ -1078,8 +1092,25 @@ class TeleglasPro:
                             signal_id=db_id,
                         )
                         await self.feature_logger.log_signal(features)
+
+                        # ML inference (shadow/blended/advisory)
+                        if self.ml_engine.is_active:
+                            ml_result = self.ml_engine.predict(features)
+                            if ml_result:
+                                trading_signal.metadata['ml_score'] = ml_result
+                                self.logger.info(
+                                    f"ML [{self.ml_engine.mode}] {symbol}: "
+                                    f"prob={ml_result['ml_probability']:.2f} "
+                                    f"conf={ml_result['ml_confidence']:.0f}% "
+                                    f"rule={trading_signal.confidence:.0f}%"
+                                )
+                                # In blended mode, adjust confidence
+                                if self.ml_engine.mode == "blended":
+                                    trading_signal.confidence = self.ml_engine.blend_score(
+                                        trading_signal.confidence, ml_result
+                                    )
                     except Exception:
-                        pass  # Feature logging is non-critical
+                        pass  # Feature logging + ML scoring is non-critical
 
         except Exception as e:
             self.logger.error(f"Analysis error for {symbol}: {e}")
@@ -1144,6 +1175,7 @@ class TeleglasPro:
                 'calibration': self.calibration.get_stats(),
                 'feature_logger': self.feature_logger.get_stats(),
                 'lifecycle': self.lifecycle.get_stats(),
+                'ml_inference': self.ml_engine.get_stats(),
             }
 
             # Update dashboard

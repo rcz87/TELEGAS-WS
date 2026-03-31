@@ -46,6 +46,11 @@ signal_lifecycle:
     EVENT: 600
     DISCOVERY: 120                 # 2 min
 
+# ML Inference
+ml:
+  mode: "shadow"                   # "off" | "shadow" | "blended" | "advisory"
+  weight: 0.3                      # ML weight in blended mode (0-1, rest is rule-based)
+
 # Alert Settings
 alerts:
   rate_limit_delay: 3            # Seconds between Telegram messages
