@@ -133,6 +133,76 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_oi_recorded ON oi_snapshots(recorded_at);
             CREATE INDEX IF NOT EXISTS idx_funding_symbol ON funding_snapshots(symbol);
             CREATE INDEX IF NOT EXISTS idx_funding_recorded ON funding_snapshots(recorded_at);
+
+            -- Signal features: full feature snapshot at signal birth (for ML training)
+            CREATE TABLE IF NOT EXISTS signal_features (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER,
+                symbol TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                setup_key TEXT NOT NULL,
+                symbol_tier TEXT,
+                session TEXT,
+                -- Confidence stages
+                base_confidence REAL,
+                adjusted_confidence REAL,
+                final_confidence REAL,
+                -- Stop hunt features
+                liq_volume REAL DEFAULT 0,
+                liq_count INTEGER DEFAULT 0,
+                directional_pct REAL DEFAULT 0,
+                absorption_volume REAL DEFAULT 0,
+                -- Order flow features
+                buy_ratio REAL DEFAULT 0,
+                net_delta REAL DEFAULT 0,
+                large_buys INTEGER DEFAULT 0,
+                large_sells INTEGER DEFAULT 0,
+                total_trades INTEGER DEFAULT 0,
+                -- Event features
+                event_count INTEGER DEFAULT 0,
+                -- Market context features
+                oi_usd REAL DEFAULT 0,
+                oi_change_pct REAL DEFAULT 0,
+                funding_rate REAL DEFAULT 0,
+                spot_cvd_slope REAL DEFAULT 0,
+                spot_cvd_direction TEXT,
+                futures_cvd_slope REAL DEFAULT 0,
+                futures_cvd_direction TEXT,
+                orderbook_delta REAL DEFAULT 0,
+                orderbook_dominant TEXT,
+                whale_count INTEGER DEFAULT 0,
+                whale_max_usd REAL DEFAULT 0,
+                price REAL DEFAULT 0,
+                volume_24h REAL DEFAULT 0,
+                -- Filter result
+                filter_assessment TEXT,
+                leading_score REAL DEFAULT 0,
+                -- Outcome (filled later by tracker)
+                outcome TEXT,
+                pnl_pct REAL,
+                mfe_pct REAL,
+                mae_pct REAL,
+                excursion_ratio REAL,
+                time_to_resolution REAL,
+                -- Timestamps
+                created_at REAL NOT NULL
+            );
+
+            -- Setup state: persists setup-level learning across restarts
+            CREATE TABLE IF NOT EXISTS setup_state (
+                setup_key TEXT PRIMARY KEY,
+                win_rate REAL NOT NULL,
+                history_json TEXT NOT NULL,
+                sample_count INTEGER NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sf_signal_id ON signal_features(signal_id);
+            CREATE INDEX IF NOT EXISTS idx_sf_setup_key ON signal_features(setup_key);
+            CREATE INDEX IF NOT EXISTS idx_sf_symbol ON signal_features(symbol);
+            CREATE INDEX IF NOT EXISTS idx_sf_created ON signal_features(created_at);
+            CREATE INDEX IF NOT EXISTS idx_sf_outcome ON signal_features(outcome);
         """)
         await self._db.commit()
 
@@ -473,3 +543,124 @@ class Database:
                              row_dict.get("recorded_at", "")])
 
         return output.getvalue()
+
+    # ==========================================================================
+    # SIGNAL FEATURES (ML training data)
+    # ==========================================================================
+
+    async def save_signal_features(self, features: dict) -> int:
+        """Save full feature snapshot at signal birth. Returns row ID."""
+        self._ensure_connected()
+        cols = [
+            "signal_id", "symbol", "signal_type", "direction", "setup_key",
+            "symbol_tier", "session",
+            "base_confidence", "adjusted_confidence", "final_confidence",
+            "liq_volume", "liq_count", "directional_pct", "absorption_volume",
+            "buy_ratio", "net_delta", "large_buys", "large_sells", "total_trades",
+            "event_count",
+            "oi_usd", "oi_change_pct", "funding_rate",
+            "spot_cvd_slope", "spot_cvd_direction",
+            "futures_cvd_slope", "futures_cvd_direction",
+            "orderbook_delta", "orderbook_dominant",
+            "whale_count", "whale_max_usd",
+            "price", "volume_24h",
+            "filter_assessment", "leading_score",
+            "created_at",
+        ]
+        values = [features.get(c, None) for c in cols]
+        placeholders = ", ".join("?" for _ in cols)
+        col_names = ", ".join(cols)
+
+        cursor = await self._db.execute(
+            f"INSERT INTO signal_features ({col_names}) VALUES ({placeholders})",
+            values,
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
+    async def update_signal_features_outcome(
+        self, signal_id: int, outcome: str, pnl_pct: float,
+        mfe_pct: float = 0, mae_pct: float = 0,
+        excursion_ratio: float = 0, time_to_resolution: float = 0,
+    ):
+        """Update feature row with outcome after evaluation."""
+        self._ensure_connected()
+        await self._db.execute(
+            """UPDATE signal_features
+               SET outcome=?, pnl_pct=?, mfe_pct=?, mae_pct=?,
+                   excursion_ratio=?, time_to_resolution=?
+               WHERE signal_id=?""",
+            (outcome, pnl_pct, mfe_pct, mae_pct,
+             excursion_ratio, time_to_resolution, signal_id),
+        )
+        await self._db.commit()
+
+    async def get_training_dataset(self, min_age_hours: int = 1, limit: int = 10000) -> List[dict]:
+        """Get labeled feature rows for ML training (outcome IS NOT NULL)."""
+        self._ensure_connected()
+        cutoff = time.time() - (min_age_hours * 3600)
+        cursor = await self._db.execute(
+            """SELECT * FROM signal_features
+               WHERE outcome IS NOT NULL AND created_at < ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (cutoff, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    # ==========================================================================
+    # SETUP STATE (persist setup-level learning)
+    # ==========================================================================
+
+    async def save_setup_state(self, setup_key: str, win_rate: float,
+                                history: list):
+        """Save setup-level learning state."""
+        self._ensure_connected()
+        await self._db.execute(
+            """INSERT OR REPLACE INTO setup_state
+               (setup_key, win_rate, history_json, sample_count, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (setup_key, win_rate, json.dumps(history), len(history), time.time()),
+        )
+        await self._db.commit()
+
+    async def save_all_setup_states(self, setup_history: dict, setup_win_rates: dict):
+        """Bulk save all setup states (atomic)."""
+        self._ensure_connected()
+        await self._db.execute("BEGIN")
+        try:
+            for key, history in setup_history.items():
+                if history:  # only save non-empty
+                    await self._db.execute(
+                        """INSERT OR REPLACE INTO setup_state
+                           (setup_key, win_rate, history_json, sample_count, updated_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (key, setup_win_rates.get(key, 0.5),
+                         json.dumps(history), len(history), time.time()),
+                    )
+            await self._db.commit()
+        except Exception:
+            await self._db.rollback()
+            raise
+
+    async def load_setup_states(self) -> Dict[str, dict]:
+        """Load all setup-level learning states."""
+        self._ensure_connected()
+        cursor = await self._db.execute("SELECT * FROM setup_state")
+        rows = await cursor.fetchall()
+        result = {}
+        for row in rows:
+            result[row["setup_key"]] = {
+                "win_rate": row["win_rate"],
+                "history": json.loads(row["history_json"]),
+            }
+        return result
+
+    async def cleanup_old_setup_states(self, max_age_days: int = 30):
+        """Remove setup states not updated in max_age_days."""
+        self._ensure_connected()
+        cutoff = time.time() - (max_age_days * 86400)
+        await self._db.execute(
+            "DELETE FROM setup_state WHERE updated_at < ?", (cutoff,)
+        )
+        await self._db.commit()

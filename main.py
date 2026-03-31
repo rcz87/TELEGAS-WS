@@ -59,6 +59,8 @@ from src.signals.leading_indicator_scorer import LeadingIndicatorScorer
 from src.utils.symbol_normalizer import normalize_symbol, to_base_symbol, display_symbol
 from src.utils.logger import setup_logger
 from src.models.events import parse_liquidation, parse_trade
+from src.signals.setup_classifier import classify_setup
+from src.signals.feature_logger import FeatureLogger
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -190,7 +192,10 @@ class TeleglasPro:
             check_interval_seconds=config.get('analysis', {}).get('signal_check_interval', 900),
             on_outcome_callback=self._on_signal_outcome
         )
-        
+
+        # Feature logger (ML training data)
+        self.feature_logger = FeatureLogger()
+
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
         self.telegram_bot = None
@@ -579,7 +584,7 @@ class TeleglasPro:
         )
 
     async def _on_signal_outcome(self, tracked, pnl_pct: float):
-        """Callback: save signal outcome to database."""
+        """Callback: save signal outcome to database + feature table."""
         try:
             if tracked._db_id:
                 await self.db.update_signal_outcome(
@@ -588,6 +593,18 @@ class TeleglasPro:
                     exit_price=tracked.exit_price or 0,
                     pnl_pct=pnl_pct
                 )
+                # Also update feature row with rich outcome metrics
+                result = tracked.outcome_result
+                if result:
+                    await self.feature_logger.update_outcome(
+                        signal_id=tracked._db_id,
+                        outcome=tracked.outcome,
+                        pnl_pct=result.pnl_pct,
+                        mfe_pct=result.mfe_pct,
+                        mae_pct=result.mae_pct,
+                        excursion_ratio=result.excursion_ratio,
+                        time_to_resolution=result.time_to_resolution,
+                    )
         except Exception as e:
             self.logger.debug(f"DB outcome save error: {e}")
 
@@ -596,7 +613,10 @@ class TeleglasPro:
         try:
             await self.db.connect()
 
-            # Restore confidence scorer state
+            # Share DB with feature logger
+            self.feature_logger.set_db(self.db)
+
+            # Restore confidence scorer state (signal-type level)
             saved_confidence = await self.db.load_confidence_state()
             if saved_confidence:
                 for signal_type, state in saved_confidence.items():
@@ -605,6 +625,16 @@ class TeleglasPro:
                 self.logger.info(
                     f"Restored confidence state: "
                     f"{len(saved_confidence)} signal types loaded"
+                )
+
+            # Restore setup-level learning state
+            saved_setups = await self.db.load_setup_states()
+            if saved_setups:
+                for setup_key, state in saved_setups.items():
+                    self.confidence_scorer._setup_history[setup_key] = state["history"]
+                    self.confidence_scorer._setup_win_rates[setup_key] = state["win_rate"]
+                self.logger.info(
+                    f"Restored setup learning: {len(saved_setups)} setups loaded"
                 )
 
             # Restore dashboard coin toggle state
@@ -669,6 +699,13 @@ class TeleglasPro:
                         history
                     )
 
+            # Save setup-level learning state
+            if self.confidence_scorer._setup_history:
+                await self.db.save_all_setup_states(
+                    dict(self.confidence_scorer._setup_history),
+                    dict(self.confidence_scorer._setup_win_rates),
+                )
+
             # Save dashboard coin state
             with dashboard_api.state_lock:
                 coins = [
@@ -720,12 +757,26 @@ class TeleglasPro:
                 if not trading_signal:
                     return
 
-                # Adjust confidence
+                # Capture base confidence before adjustments
+                base_confidence = trading_signal.confidence
+
+                # Classify setup for granular learning
+                setup_key = classify_setup(
+                    signal_type=trading_signal.signal_type,
+                    direction=trading_signal.direction,
+                    symbol=symbol,
+                    metadata=trading_signal.metadata,
+                    monitoring_config=self.config.get('monitoring', {}),
+                )
+                trading_signal.metadata['setup_key'] = setup_key
+
+                # Adjust confidence (setup-aware)
                 adjusted_confidence = self.confidence_scorer.adjust_confidence(
                     trading_signal.confidence,
                     trading_signal.signal_type,
                     trading_signal.metadata,
-                    symbol=symbol
+                    symbol=symbol,
+                    setup_key=setup_key,
                 )
                 trading_signal.confidence = adjusted_confidence
 
@@ -969,7 +1020,10 @@ class TeleglasPro:
                     sl = price_zone[0] - (zone_spread * 0.3) if is_long else price_zone[1] + (zone_spread * 0.3)
                     risk = abs(entry - sl)
                     tp = entry + (risk * 2) if is_long else entry - (risk * 2)
-                    tracked = self.signal_tracker.track_signal(trading_signal, entry, sl, tp)
+                    tracked = self.signal_tracker.track_signal(
+                        trading_signal, entry, sl, tp,
+                        setup_key=trading_signal.metadata.get('setup_key', '')
+                    )
 
                     # Save signal to database
                     try:
@@ -984,7 +1038,24 @@ class TeleglasPro:
                         )
                         tracked._db_id = db_id
                     except Exception:
-                        pass  # DB save is non-critical
+                        db_id = 0
+
+                    # Log full feature snapshot for ML training
+                    try:
+                        features = self.feature_logger.extract_features(
+                            signal=trading_signal,
+                            symbol=symbol,
+                            setup_key=trading_signal.metadata.get('setup_key', ''),
+                            base_confidence=base_confidence,
+                            adjusted_confidence=adjusted_confidence,
+                            final_confidence=trading_signal.confidence,
+                            filter_assessment=filter_result.assessment if filter_result else '',
+                            leading_score=leading_score.total if leading_score else 0,
+                            signal_id=db_id,
+                        )
+                        await self.feature_logger.log_signal(features)
+                    except Exception:
+                        pass  # Feature logging is non-critical
 
         except Exception as e:
             self.logger.error(f"Analysis error for {symbol}: {e}")
@@ -1638,7 +1709,7 @@ class TeleglasPro:
             except Exception as e:
                 self.logger.error(f"Baseline save error: {e}")
 
-            # Periodically save confidence state
+            # Periodically save confidence state (type-level + setup-level)
             try:
                 for signal_type, history in self.confidence_scorer.signal_history.items():
                     if history:
@@ -1647,8 +1718,14 @@ class TeleglasPro:
                             self.confidence_scorer.win_rates.get(signal_type, 0.5),
                             history
                         )
+                # Save setup-level learning state
+                if self.confidence_scorer._setup_history:
+                    await self.db.save_all_setup_states(
+                        dict(self.confidence_scorer._setup_history),
+                        dict(self.confidence_scorer._setup_win_rates),
+                    )
             except Exception as e:
-                self.logger.error(f"Confidence save error: {e}")
+                self.logger.error(f"Confidence/setup save error: {e}")
     
     async def run(self):
         """Run the complete system"""
