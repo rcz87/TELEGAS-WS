@@ -267,7 +267,8 @@ class CoinGlassRestPoller:
         multiple symbols in parallel while respecting API rate limits.
         """
         # Concurrency limit: max simultaneous requests to CoinGlass
-        sem = asyncio.Semaphore(5)
+        # Keep at 3 to avoid "Too Many Requests" with 80+ symbols
+        sem = asyncio.Semaphore(3)
 
         # ── Phase 1: Global endpoints (not per-symbol) ──────────────
         whale_alerts = await self._fetch_whale_alerts()

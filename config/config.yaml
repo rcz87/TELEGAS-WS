@@ -30,7 +30,7 @@ thresholds:
 
 # Signal Settings
 signals:
-  min_confidence: 70.0           # Lowered from 78 — CVD VETO hard block handles quality
+  min_confidence: 60.0           # Lowered from 70 — tier-based thresholds + CVD VETO handle quality
   max_signals_per_hour: 10       # Rate limit (quality over quantity)
   cooldown_minutes: 15           # Cooldown between same signals
 
@@ -57,9 +57,9 @@ alerts:
   max_retries: 3                 # Retry attempts on failure
   
   # Alert priorities
-  urgent_threshold: 92           # Confidence for URGENT (very high conviction)
-  watch_threshold: 85            # Confidence for WATCH
-  info_threshold: 70             # Confidence for INFO (minimum quality)
+  urgent_threshold: 85           # Confidence for URGENT
+  watch_threshold: 75            # Confidence for WATCH
+  info_threshold: 60             # Confidence for INFO (matches min_confidence)
 
 # Buffer Settings
 buffers:
@@ -310,7 +310,7 @@ watchlist:
 # Market Context (OI + Funding Rate from CoinGlass REST API)
 market_context:
   enabled: true
-  poll_interval: 120             # Seconds between REST API polls (2 minutes)
+  poll_interval: 180             # Seconds between REST API polls (3 minutes)
   max_snapshots: 72              # Rolling buffer size per symbol (6 hours at 5-min)
   filter_mode: "normal"          # "strict" = only FAVORABLE, "normal" = block UNFAVORABLE, "permissive" = pass all
   confidence_adjust: true        # Adjust confidence based on market context
