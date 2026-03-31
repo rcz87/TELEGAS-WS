@@ -1612,7 +1612,7 @@ class TeleglasPro:
                 # OI interpretation — use short-term price change, not 24h
                 oi_chg = ctx.get('oi_change_1h_pct', 0)
                 # Derive recent price change from price snapshots (last 2)
-                price_history = self.market_context_buffer.get_price_history(base, limit=2)
+                price_history = self.market_context_buffer.get_price_history(base_symbol, limit=2)
                 if len(price_history) >= 2:
                     p_now = price_history[-1].price
                     p_prev = price_history[0].price
