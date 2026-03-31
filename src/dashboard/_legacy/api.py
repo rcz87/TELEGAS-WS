@@ -396,6 +396,30 @@ async def get_calibration(_rl=Depends(check_rate_limit)):
         return {"table": cal.get_table(), "stats": cal.get_stats()}
     return {"table": [], "stats": {"total_signals": 0, "note": "calibration not yet built"}}
 
+@app.get("/api/signals/active")
+async def get_active_signals(_rl=Depends(check_rate_limit)):
+    """Get all alive primary signals with lifecycle state (sorted by effective score)."""
+    lc = getattr(_state_manager, '_lifecycle', None)
+    if lc:
+        return {"signals": lc.get_active_signals()}
+    return {"signals": []}
+
+@app.get("/api/signals/primary/{symbol}")
+async def get_primary_signal(symbol: str, _rl=Depends(check_rate_limit)):
+    """Get current primary signal + recent history for a coin."""
+    lc = getattr(_state_manager, '_lifecycle', None)
+    if not lc:
+        return {"symbol": symbol, "primary": None, "recent": []}
+    return lc.get_coin_state(symbol.upper())
+
+@app.get("/api/signals/lifecycle")
+async def get_lifecycle_overview(_rl=Depends(check_rate_limit)):
+    """Get lifecycle state for all coins with active signals."""
+    lc = getattr(_state_manager, '_lifecycle', None)
+    if lc:
+        return {"coins": lc.get_all_coin_states(), "stats": lc.get_stats()}
+    return {"coins": {}, "stats": {}}
+
 @app.get("/api/signals/history")
 async def get_signal_history(symbol: str = None, limit: int = 100, _auth=Depends(verify_token)):
     """Get signal history from database (persisted across restarts)."""

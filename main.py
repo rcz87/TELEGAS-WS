@@ -63,6 +63,7 @@ from src.signals.setup_classifier import classify_setup
 from src.signals.feature_logger import FeatureLogger
 from src.ml.dataset_builder import DatasetBuilder
 from src.ml.calibration import CalibrationTable
+from src.signals.signal_lifecycle import SignalLifecycleManager
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -201,6 +202,10 @@ class TeleglasPro:
         # ML components
         self.dataset_builder = DatasetBuilder()
         self.calibration = CalibrationTable()
+
+        # Signal lifecycle (expiry, primary selection, anti-flip)
+        lifecycle_expiry = config.get('signal_lifecycle', {}).get('expiry', {})
+        self.lifecycle = SignalLifecycleManager(expiry_config=lifecycle_expiry or None)
 
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
@@ -694,8 +699,9 @@ class TeleglasPro:
             # Share DB reference with dashboard for export endpoints
             dashboard_api._db = self.db
 
-            # Share calibration with dashboard API for /api/calibration endpoint
+            # Share ML + lifecycle with dashboard API for endpoints
             dashboard_api._state_manager._calibration = self.calibration
+            dashboard_api._state_manager._lifecycle = self.lifecycle
 
         except Exception as e:
             self.logger.error(f"Database init error: {e} (continuing without persistence)")
@@ -996,14 +1002,19 @@ class TeleglasPro:
                     filter_passed = filter_result.passed
 
                 # Always send to dashboard (user can see all signals in web UI)
-                dashboard_api.add_signal({
+                signal_dict = {
                     'symbol': symbol,
                     'type': trading_signal.signal_type,
+                    'direction': trading_signal.direction,
                     'confidence': int(trading_signal.confidence),
-                    'description': f"{trading_signal.signal_type} detected",
+                    'description': f"{trading_signal.signal_type} {trading_signal.direction}",
                     'market_context': filter_result.assessment,
                     'leading_label': leading_score.label_text,
-                })
+                }
+                dashboard_api.add_signal(signal_dict)
+
+                # Register with lifecycle manager (expiry, primary selection)
+                lifecycle_data = self.lifecycle.ingest(signal_dict)
 
                 # Check dashboard toggle AND market context filter
                 if self._is_coin_active(symbol) and filter_passed:
@@ -1115,6 +1126,9 @@ class TeleglasPro:
             uptime = (datetime.now() - self.start_time).total_seconds()
             self.stats['uptime_seconds'] = int(uptime)
 
+            # Tick signal lifecycle (expire, weaken, cleanup)
+            self.lifecycle.tick()
+
             # Collect analyzer stats for dashboard visibility
             self.stats['analyzers'] = {
                 'stop_hunt': self.stop_hunt_detector.get_stats(),
@@ -1129,6 +1143,7 @@ class TeleglasPro:
                 'rest_poller': self.rest_poller.get_stats(),
                 'calibration': self.calibration.get_stats(),
                 'feature_logger': self.feature_logger.get_stats(),
+                'lifecycle': self.lifecycle.get_stats(),
             }
 
             # Update dashboard

@@ -34,6 +34,18 @@ signals:
   max_signals_per_hour: 10       # Rate limit (quality over quantity)
   cooldown_minutes: 15           # Cooldown between same signals
 
+# Signal Lifecycle (dashboard primary signal card)
+signal_lifecycle:
+  expiry:                          # Seconds before signal expires (per type)
+    STOP_HUNT: 600                 # 10 min
+    ACCUMULATION: 900              # 15 min
+    DISTRIBUTION: 900              # 15 min
+    WHALE_ACCUMULATION: 600
+    WHALE_DISTRIBUTION: 600
+    VOLUME_SPIKE: 300              # 5 min
+    EVENT: 600
+    DISCOVERY: 120                 # 2 min
+
 # Alert Settings
 alerts:
   rate_limit_delay: 3            # Seconds between Telegram messages
