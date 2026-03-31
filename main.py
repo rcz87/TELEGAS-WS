@@ -1529,9 +1529,17 @@ class TeleglasPro:
                     taker_buy = getattr(fut_hist[-1], 'taker_buy_vol', 0)
                     taker_sell = getattr(fut_hist[-1], 'taker_sell_vol', 0)
 
-                # OI interpretation
+                # OI interpretation — use short-term price change, not 24h
                 oi_chg = ctx.get('oi_change_1h_pct', 0)
-                price_chg = ctx.get('price_change_24h_pct', 0)
+                # Derive recent price change from price snapshots (last 2)
+                price_history = self.market_context_buffer.get_price_history(base, limit=2)
+                if len(price_history) >= 2:
+                    p_now = price_history[-1].price
+                    p_prev = price_history[0].price
+                    price_chg = ((p_now - p_prev) / p_prev * 100) if p_prev > 0 else 0
+                else:
+                    price_chg = ctx.get('price_change_24h_pct', 0)
+
                 if oi_chg < -0.3 and price_chg < 0:
                     oi_interp = "DELEVERAGING"
                 elif oi_chg > 0.3 and price_chg > 0:

@@ -204,14 +204,26 @@ class MessageFormatter:
         if not per_exchange and fr == 0:
             return ""
 
+        # Sanity check: FR should be between -1% and +1% per interval
+        # Anything outside this is bogus data (API error or format mismatch)
+        def is_sane_fr(rate):
+            return abs(rate) < 0.01  # < 1%
+
         lines = ["\U0001f4b8 *FUNDING RATE*"]
         if per_exchange:
-            sorted_rates = sorted(per_exchange.items(), key=lambda x: abs(x[1]), reverse=True)
-            for exchange, rate in sorted_rates[:5]:
-                # CoinGlass per-exchange rates are already in % form (0.01 = 1%)
-                lines.append(f"{exchange:9s}: {rate:+.4f}%")
-        else:
+            sane_rates = {k: v for k, v in per_exchange.items() if is_sane_fr(v)}
+            if sane_rates:
+                sorted_rates = sorted(sane_rates.items(), key=lambda x: abs(x[1]), reverse=True)
+                for exchange, rate in sorted_rates[:5]:
+                    lines.append(f"{exchange:9s}: {rate:+.4f}%")
+            elif is_sane_fr(fr):
+                lines.append(f"Avg      : {fr:+.4f}%")
+            else:
+                lines.append(f"Avg      : N/A (data unavailable)")
+        elif is_sane_fr(fr):
             lines.append(f"Avg      : {fr:+.4f}%")
+        else:
+            lines.append(f"Avg      : N/A (data unavailable)")
         lines.append(f"Alignment: {funding_align}")
 
         return "\n".join(lines)
