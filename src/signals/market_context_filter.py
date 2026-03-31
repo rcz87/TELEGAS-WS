@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ..utils.logger import setup_logger
+from ..utils.symbol_normalizer import to_base_symbol as _to_base
 
 
 @dataclass
@@ -78,6 +79,8 @@ class MarketContextFilter:
             "neutral": 0,
             "unfavorable": 0,
             "no_data": 0,
+            "cvd_vetoed": 0,
+            "whale_vetoed": 0,
         }
 
     @staticmethod
@@ -85,12 +88,9 @@ class MarketContextFilter:
         """
         Convert trading pair to CoinGlass base symbol.
 
-        BTCUSDT -> BTC, ETHUSDT -> ETH, 1000PEPEUSDT -> 1000PEPE
+        BTCUSDT -> BTC, BTC-USDT-SWAP -> BTC, BTCUSDT_UMCBL -> BTC
         """
-        for suffix in ("USDT", "BUSD", "USDC", "USD"):
-            if pair_symbol.endswith(suffix):
-                return pair_symbol[: -len(suffix)]
-        return pair_symbol
+        return _to_base(pair_symbol)
 
     def evaluate(self, signal) -> FilterResult:
         """
@@ -138,6 +138,27 @@ class MarketContextFilter:
                 elif context.oi_alignment == "SQUEEZE_RISK":
                     conf_adj = -3.0
 
+            # CVD adjustments (additive, on top of base)
+            cvd_align = getattr(context, 'cvd_alignment', 'NEUTRAL')
+            if cvd_align == "VETO":
+                conf_adj = min(conf_adj, 0) - 15.0
+                self._stats["cvd_vetoed"] += 1
+            elif cvd_align == "CONFIRMS":
+                conf_adj += 5.0
+            elif cvd_align == "PARTIAL":
+                conf_adj += 2.0
+
+            # Whale adjustments
+            whale_align = getattr(context, 'whale_alignment', 'NEUTRAL')
+            if whale_align == "VETO":
+                conf_adj = min(conf_adj, 0) - 15.0
+                self._stats["whale_vetoed"] += 1
+            elif whale_align == "CAUTION":
+                # Halve any positive adjustment, then subtract 5
+                if conf_adj > 0:
+                    conf_adj = conf_adj / 2.0
+                conf_adj -= 5.0
+
         # Determine pass/fail based on mode
         if self.mode == "strict":
             passed = assessment == "FAVORABLE"
@@ -153,10 +174,13 @@ class MarketContextFilter:
 
         reason = self._build_reason(context, signal.direction)
 
+        cvd_align = getattr(context, 'cvd_alignment', 'NEUTRAL')
+        whale_align = getattr(context, 'whale_alignment', 'NEUTRAL')
         self.logger.info(
             f"{'PASS' if passed else 'BLOCK'} {signal.symbol} {signal.direction}: "
             f"{assessment} (funding={context.funding_alignment}, "
-            f"OI={context.oi_alignment}) adj={conf_adj:+.0f}"
+            f"OI={context.oi_alignment}, CVD={cvd_align}, "
+            f"whale={whale_align}) adj={conf_adj:+.0f}"
         )
 
         return FilterResult(
@@ -192,6 +216,22 @@ class MarketContextFilter:
             parts.append(f"OI +{context.oi_change_1h_pct:.1f}% 1h (squeeze risk)")
         else:
             parts.append(f"OI {context.oi_change_1h_pct:+.1f}% 1h (stable)")
+
+        # CVD info
+        cvd_align = getattr(context, 'cvd_alignment', 'NEUTRAL')
+        if cvd_align != "NEUTRAL":
+            spot_dir = getattr(context, 'spot_cvd_direction', 'UNKNOWN')
+            fut_dir = getattr(context, 'futures_cvd_direction', 'UNKNOWN')
+            parts.append(f"CVD spot={spot_dir} fut={fut_dir} [{cvd_align}]")
+
+        # Whale info
+        whale_align = getattr(context, 'whale_alignment', 'NEUTRAL')
+        if whale_align != "NEUTRAL":
+            whale_val = getattr(context, 'whale_largest_value_usd', 0)
+            whale_dir = getattr(context, 'whale_largest_direction', '')
+            parts.append(
+                f"Whale ${whale_val/1_000_000:.1f}M {whale_dir} [{whale_align}]"
+            )
 
         return " | ".join(parts)
 

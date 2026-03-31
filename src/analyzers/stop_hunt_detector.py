@@ -71,16 +71,19 @@ class StopHuntDetector:
         self.absorption_threshold = absorption_threshold
         self.absorption_min_order_usd = absorption_min_order_usd
 
-        # Tiered thresholds for dynamic all-coin monitoring
+        # 4-Tier thresholds for dynamic all-coin monitoring
         monitoring = monitoring_config or {}
         self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
         self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
+        self._tier3_symbols = set(monitoring.get('tier3_symbols', []))
         self._tier1_cascade = monitoring.get('tier1_cascade', threshold)
         self._tier2_cascade = monitoring.get('tier2_cascade', 200_000)
         self._tier3_cascade = monitoring.get('tier3_cascade', 50_000)
+        self._tier4_cascade = monitoring.get('tier4_cascade', 10_000)
         self._tier1_absorption = monitoring.get('tier1_absorption', absorption_threshold)
         self._tier2_absorption = monitoring.get('tier2_absorption', 20_000)
         self._tier3_absorption = monitoring.get('tier3_absorption', 5_000)
+        self._tier4_absorption = monitoring.get('tier4_absorption', 1_000)
 
         self.logger = setup_logger("StopHuntDetector", "INFO")
         self._detections = 0
@@ -103,8 +106,10 @@ class StopHuntDetector:
             return (self._tier1_cascade, self._tier1_absorption)
         elif symbol in self._tier2_symbols:
             return (self._tier2_cascade, self._tier2_absorption)
-        else:
+        elif symbol in self._tier3_symbols:
             return (self._tier3_cascade, self._tier3_absorption)
+        else:
+            return (self._tier4_cascade, self._tier4_absorption)
         
     async def analyze(self, symbol: str, cascade_window: int = 30, absorption_window: int = 30) -> Optional[StopHuntSignal]:
         """
@@ -370,6 +375,12 @@ class StopHuntDetector:
                 confidence += 15
             elif absorption_ratio > 0.05:
                 confidence += 10
+            elif absorption_ratio > 0:
+                confidence += 0  # minimal absorption, no bonus
+            else:
+                confidence -= 15  # ZERO absorption = penalty
+        else:
+            confidence -= 15  # no volume data = penalty
 
         # Factor 3: Directional clarity
         if directional_pct > 0.9:  # >90% one direction
@@ -385,7 +396,12 @@ class StopHuntDetector:
         elif liquidation_count > 50:
             confidence += 3
 
-        return min(confidence, 99.0)  # Cap at 99%
+        # Cap at 99%, and hard cap at 70% if no absorption
+        no_absorption = (absorption_volume <= 0)
+        final = min(confidence, 99.0)
+        if no_absorption:
+            final = min(final, 70.0)  # no whale absorption = cannot pass min_confidence 78%
+        return final
     
     def get_stats(self) -> dict:
         """Get detector statistics"""

@@ -24,6 +24,8 @@ v4.0 Changes:
 """
 
 import asyncio
+import collections
+import json as _json
 import sys
 import signal
 import os
@@ -53,12 +55,14 @@ from src.storage.database import Database
 from src.connection.rest_poller import CoinGlassRestPoller
 from src.processors.market_context_buffer import MarketContextBuffer
 from src.signals.market_context_filter import MarketContextFilter
+from src.signals.leading_indicator_scorer import LeadingIndicatorScorer
+from src.utils.symbol_normalizer import normalize_symbol, to_base_symbol, display_symbol
 from src.utils.logger import setup_logger
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
 
-def start_dashboard_server(host: str = "0.0.0.0", port: int = 8080):
+def start_dashboard_server(host: str = "127.0.0.1", port: int = 8081):
     """Start dashboard server in background thread.
 
     WARNING: Default host 0.0.0.0 binds to all interfaces.
@@ -125,16 +129,20 @@ class TeleglasPro:
             learning_rate=0.1,
             monitoring_config=monitoring_config
         )
-        # CRITICAL FIX Bug #6: Load cooldown from config (was hardcoded)
+        # Tier-based cooldowns: T1=60min, T2=30min, T3=20min, T4=15min
         self.signal_validator = SignalValidator(
             min_confidence=signals_config.get('min_confidence', 70.0),
             max_signals_per_hour=signals_config.get('max_signals_per_hour', 50),
-            cooldown_minutes=signals_config.get('cooldown_minutes', 5)
+            cooldown_minutes=signals_config.get('cooldown_minutes', 5),
+            monitoring_config=monitoring_config
         )
         
         # Alerts
         self.message_formatter = MessageFormatter()
         self.alert_queue = AlertQueue(max_size=1000)
+
+        # Leading indicator scorer (CVD + OI primary scoring, tier-aware)
+        self.leading_scorer = LeadingIndicatorScorer(monitoring_config=monitoring_config)
 
         # Database for persistent storage
         storage_config = config.get('storage', {})
@@ -153,12 +161,25 @@ class TeleglasPro:
             enable_confidence_adjust=market_context_config.get('confidence_adjust', True),
         )
         rest_symbols = self._build_rest_symbols(pairs_config)
+        # Merge watchlist into REST symbols
+        watchlist = config.get('watchlist', [])
+        for sym in watchlist:
+            s = sym.strip().upper()
+            if s and s not in rest_symbols:
+                rest_symbols.append(s)
         self.rest_poller = CoinGlassRestPoller(
             api_key=coinglass_config.get('api_key', ''),
             symbols=rest_symbols,
-            poll_interval=market_context_config.get('poll_interval', 300),
+            poll_interval=market_context_config.get('poll_interval', 120),
+            request_delay=0.25,
             on_oi_data=self._on_oi_data,
             on_funding_data=self._on_funding_data,
+            on_spot_cvd_data=self._on_spot_cvd_data if market_context_config.get('cvd_enabled', True) else None,
+            on_futures_cvd_data=self._on_futures_cvd_data if market_context_config.get('cvd_enabled', True) else None,
+            on_whale_data=self._on_whale_data if market_context_config.get('whale_enabled', True) else None,
+            on_orderbook_data=self._on_orderbook_data if market_context_config.get('orderbook_enabled', True) else None,
+            on_funding_per_exchange_data=self._on_funding_per_exchange_data,
+            on_price_data=self._on_price_data if market_context_config.get('price_enabled', True) else None,
         )
 
         # Signal outcome tracker (with DB callback for persistence)
@@ -203,6 +224,20 @@ class TeleglasPro:
         self.discovered_symbols: set = set()
         self._trade_subscribed: set = set()  # Symbols with active trade subscriptions
 
+        # Auto-add symbols to REST poller based on signal frequency
+        self._signal_frequency: collections.Counter = collections.Counter()
+        self._original_rest_symbols = set(rest_symbols)
+        self.MAX_REST_SYMBOLS = 120
+
+        # Proactive scan cooldowns (symbol -> last alert timestamp)
+        self._proactive_cooldowns: dict = {}
+        self.PROACTIVE_SCAN_INTERVAL = 120   # Scan every 2 minutes
+        self.PROACTIVE_COOLDOWN = 2700       # 45 min cooldown per coin
+        self.PROACTIVE_MIN_SCORE = 65        # Minimum score to alert (quality only)
+        self.PROACTIVE_MAX_PER_CYCLE = 3     # Max alerts per scan cycle
+        self.PROACTIVE_MAX_PER_HOUR = 5      # Max proactive alerts per hour
+        self._proactive_hourly: list = []    # Timestamps for hourly rate limit
+
         # Debouncing (FIX: Prevent task explosion)
         self.analysis_locks = {}  # Per-symbol locks
         self.last_analysis = {}   # Per-symbol last analysis time
@@ -233,7 +268,7 @@ class TeleglasPro:
             daemon=True
         )
         self.dashboard_thread.start()
-        self.logger.info("📊 Dashboard started at http://localhost:8080")
+        self.logger.info("📊 Dashboard started at http://127.0.0.1:8081")
         
         self.logger.info("✅ All components initialized")
     
@@ -346,9 +381,10 @@ class TeleglasPro:
                 # Validate structure
                 validation = self.data_validator.validate_liquidation(liq_event)
                 if validation.is_valid:
-                    symbol = liq_event.get('symbol', 'UNKNOWN')
+                    raw_symbol = liq_event.get('symbol', 'UNKNOWN')
+                    symbol = normalize_symbol(raw_symbol)
 
-                    # Add to buffer (FIX: was 'liquidation_data=' - wrong param name)
+                    # Add to buffer with normalized symbol
                     self.buffer_manager.add_liquidation(
                         symbol=symbol,
                         event=liq_event
@@ -389,9 +425,10 @@ class TeleglasPro:
                 # Validate structure
                 validation = self.data_validator.validate_trade(trade)
                 if validation.is_valid:
-                    symbol = trade.get('symbol', 'UNKNOWN')
+                    raw_symbol = trade.get('symbol', 'UNKNOWN')
+                    symbol = normalize_symbol(raw_symbol)
 
-                    # Add to buffer (FIX: was 'trade_data=' - wrong param name)
+                    # Add to buffer with normalized symbol
                     self.buffer_manager.add_trade(
                         symbol=symbol,
                         event=trade
@@ -430,12 +467,7 @@ class TeleglasPro:
         base_symbols = set()
         all_pairs = pairs_config.get('primary', []) + pairs_config.get('secondary', [])
         for pair in all_pairs:
-            for suffix in ("USDT", "USD", "BUSD", "USDC"):
-                if pair.endswith(suffix):
-                    base_symbols.add(pair[:-len(suffix)])
-                    break
-            else:
-                base_symbols.add(pair)
+            base_symbols.add(to_base_symbol(pair))
         return sorted(base_symbols)
 
     async def _on_oi_data(self, oi_snapshot):
@@ -466,6 +498,78 @@ class TeleglasPro:
             )
         except Exception as e:
             self.logger.debug(f"DB funding save error: {e}")
+
+    async def _on_spot_cvd_data(self, snapshot):
+        """Callback: store spot CVD snapshot in buffer."""
+        self.market_context_buffer.add_spot_cvd_snapshot(snapshot)
+        self.logger.debug(
+            f"SpotCVD {snapshot.symbol}: {snapshot.cvd_direction} "
+            f"(slope={snapshot.cvd_slope:.4f}, latest={snapshot.cvd_latest:,.0f})"
+        )
+
+    async def _on_futures_cvd_data(self, snapshot):
+        """Callback: store futures CVD snapshot in buffer."""
+        self.market_context_buffer.add_futures_cvd_snapshot(snapshot)
+        self.logger.debug(
+            f"FuturesCVD {snapshot.symbol}: {snapshot.cvd_direction} "
+            f"(slope={snapshot.cvd_slope:.4f}, latest={snapshot.cvd_latest:,.0f})"
+        )
+
+    async def _on_whale_data(self, alert):
+        """Callback: store whale alert in buffer. Log large positions."""
+        self.market_context_buffer.update_whale_positions([alert])
+
+        # Track recent whale alerts for dashboard
+        if not hasattr(self, '_recent_whale_alerts'):
+            self._recent_whale_alerts = []
+        action = "OPEN" if alert.position_action == 1 else "CLOSE"
+        self._recent_whale_alerts.append({
+            "symbol": alert.symbol,
+            "direction": alert.direction,
+            "action": action,
+            "value_usd": alert.position_value_usd,
+            "entry_price": alert.entry_price,
+            "time": datetime.now().strftime('%H:%M:%S'),
+        })
+        # Keep last 20
+        self._recent_whale_alerts = self._recent_whale_alerts[-20:]
+
+        if alert.position_value_usd >= 1_000_000:
+            # Write state on significant whale alert
+            try:
+                symbols = list(self.rest_poller.symbols)
+                self._write_live_state(symbols)
+            except Exception:
+                pass
+
+        if alert.position_value_usd >= 5_000_000:
+            self.logger.info(
+                f"🐋 Whale alert: {alert.symbol} {alert.direction} "
+                f"${alert.position_value_usd/1_000_000:.1f}M on Hyperliquid"
+            )
+
+    async def _on_orderbook_data(self, snapshot):
+        """Callback: store orderbook delta in buffer."""
+        self.market_context_buffer.add_orderbook_snapshot(snapshot)
+        self.logger.debug(
+            f"Orderbook {snapshot.symbol}: {snapshot.dominant_side} "
+            f"(bids={snapshot.total_bid_vol:,.0f}, asks={snapshot.total_ask_vol:,.0f})"
+        )
+
+    async def _on_funding_per_exchange_data(self, snapshot):
+        """Callback: store per-exchange funding rates in buffer."""
+        self.market_context_buffer.update_funding_per_exchange(snapshot)
+        self.logger.debug(
+            f"FundingPerEx {snapshot.symbol}: {len(snapshot.rates)} exchanges"
+        )
+
+    async def _on_price_data(self, snapshot):
+        """Callback: store price snapshot in buffer."""
+        self.market_context_buffer.add_price_snapshot(snapshot)
+        self.logger.debug(
+            f"Price {snapshot.symbol}: ${snapshot.price:,.2f} "
+            f"({snapshot.change_24h_pct:+.1f}% 24h)"
+        )
 
     async def _on_signal_outcome(self, tracked, pnl_pct: float):
         """Callback: save signal outcome to database."""
@@ -624,8 +728,17 @@ class TeleglasPro:
                     self.logger.debug(f"Signal rejected: {reason}")
                     return
 
-                # Market context filter (OI + Funding Rate)
+                # Market context filter (OI + Funding Rate + CVD + Whale)
                 filter_result = self.market_context_filter.evaluate(trading_signal)
+
+                # HARD BLOCK: if filter says not passed, do not send alert
+                if not filter_result.passed:
+                    self.logger.info(
+                        f"Signal BLOCKED by market context: {symbol} "
+                        f"{trading_signal.signal_type} {trading_signal.direction} — "
+                        f"{filter_result.assessment}: {filter_result.reason}"
+                    )
+                    return
 
                 # Apply confidence adjustment from market context
                 if filter_result.confidence_adjustment != 0:
@@ -643,16 +756,121 @@ class TeleglasPro:
 
                 self.stats['signals_generated'] += 1
 
+                # Auto-subscribe to trade feed for this coin (enables order flow + event detection next time)
+                if symbol not in self._trade_subscribed:
+                    trade_channel = f"futures_trades@all_{symbol}@10000"
+                    subscribe_msg = {"method": "subscribe", "channels": [trade_channel]}
+                    if await self.websocket_client.send_message(subscribe_msg):
+                        self._trade_subscribed.add(symbol)
+                        self.logger.info(f"Auto-subscribed trades: {symbol}")
+
+                # Auto-add symbol to REST poller for market context
+                base_symbol = to_base_symbol(symbol)
+                self._signal_frequency[base_symbol] += 1
+                if base_symbol not in self.rest_poller.symbols:
+                    if len(self.rest_poller.symbols) < self.MAX_REST_SYMBOLS:
+                        self.rest_poller.update_symbols([base_symbol])
+                        self.logger.info(
+                            f"Auto-added {base_symbol} to REST poller "
+                            f"({len(self.rest_poller.symbols)}/{self.MAX_REST_SYMBOLS})"
+                        )
+                    else:
+                        # At cap: replace least-frequent non-original symbol
+                        removable = [
+                            s for s in self.rest_poller.symbols
+                            if s not in self._original_rest_symbols
+                        ]
+                        if removable:
+                            least = min(removable, key=lambda s: self._signal_frequency.get(s, 0))
+                            if self._signal_frequency[base_symbol] > self._signal_frequency.get(least, 0):
+                                self.rest_poller.symbols.remove(least)
+                                self.rest_poller.update_symbols([base_symbol])
+                                self.logger.info(
+                                    f"Replaced {least} with {base_symbol} in REST poller"
+                                )
+
                 # Inject market context into metadata for message formatting
                 if filter_result.market_context:
+                    ctx = filter_result.market_context
                     trading_signal.metadata['market_context'] = {
-                        'funding_rate': filter_result.market_context.current_funding_rate,
-                        'funding_alignment': filter_result.market_context.funding_alignment,
-                        'oi_usd': filter_result.market_context.current_oi_usd,
-                        'oi_change_1h_pct': filter_result.market_context.oi_change_1h_pct,
-                        'oi_alignment': filter_result.market_context.oi_alignment,
+                        'funding_rate': ctx.current_funding_rate,
+                        'funding_alignment': ctx.funding_alignment,
+                        'oi_usd': ctx.current_oi_usd,
+                        'oi_change_1h_pct': ctx.oi_change_1h_pct,
+                        'oi_alignment': ctx.oi_alignment,
                         'combined_assessment': filter_result.assessment,
+                        # CVD data
+                        'spot_cvd_direction': ctx.spot_cvd_direction,
+                        'spot_cvd_slope': ctx.spot_cvd_slope,
+                        'spot_cvd_latest': ctx.spot_cvd_latest,
+                        'futures_cvd_direction': ctx.futures_cvd_direction,
+                        'futures_cvd_slope': ctx.futures_cvd_slope,
+                        'futures_cvd_latest': ctx.futures_cvd_latest,
+                        'cvd_alignment': ctx.cvd_alignment,
+                        # Whale data
+                        'whale_conflicting': ctx.whale_conflicting,
+                        'whale_largest_value_usd': ctx.whale_largest_value_usd,
+                        'whale_largest_direction': ctx.whale_largest_direction,
+                        'whale_alignment': ctx.whale_alignment,
+                        # Orderbook data
+                        'orderbook_bid_vol': ctx.orderbook_bid_vol,
+                        'orderbook_ask_vol': ctx.orderbook_ask_vol,
+                        'orderbook_dominant': ctx.orderbook_dominant,
+                        # Per-exchange funding rates
+                        'funding_per_exchange': ctx.funding_per_exchange,
+                        # Price data
+                        'current_price': ctx.current_price,
+                        'price_change_24h_pct': ctx.price_change_24h_pct,
+                        'volume_24h': ctx.volume_24h,
                     }
+
+                # Ensure market_context dict exists even without REST data
+                trading_signal.metadata.setdefault('market_context', {})
+
+                # --- Volume Filter: skip low-volume coins per tier ---
+                vol_24h = trading_signal.metadata.get('market_context', {}).get('volume_24h', 0)
+                if vol_24h > 0:
+                    tier = self.signal_validator._get_symbol_tier(symbol)
+                    min_volumes = {
+                        1: monitoring_config.get('tier1_min_volume_24h', 50_000_000),
+                        2: monitoring_config.get('tier2_min_volume_24h', 20_000_000),
+                        3: monitoring_config.get('tier3_min_volume_24h', 5_000_000),
+                        4: monitoring_config.get('tier4_min_volume_24h', 1_000_000),
+                    }
+                    min_vol = min_volumes.get(tier, 1_000_000)
+                    if vol_24h < min_vol:
+                        self.logger.info(
+                            f"⏭️ Low volume: skip | {symbol} tier {tier} "
+                            f"vol=${vol_24h/1e6:.1f}M < min=${min_vol/1e6:.0f}M"
+                        )
+                        return
+
+                # Fallback: derive price from WebSocket trade data if REST price missing
+                mc = trading_signal.metadata['market_context']
+                if mc.get('current_price', 0) == 0:
+                    trades = self.buffer_manager.get_trades(symbol, time_window=60)
+                    if trades:
+                        ws_price = float(trades[-1].get('price', 0))
+                        if ws_price > 0:
+                            mc['current_price'] = ws_price
+                            mc['_price_source'] = 'websocket'
+                    # Last resort: price from liquidation data
+                    if mc.get('current_price', 0) == 0:
+                        liqs_recent = self.buffer_manager.get_liquidations(symbol, time_window=60)
+                        if liqs_recent:
+                            liq_price = float(liqs_recent[-1].get('price', 0))
+                            if liq_price > 0:
+                                mc['current_price'] = liq_price
+                                mc['_price_source'] = 'liquidation'
+
+                # Compute 24h liquidation volume from buffer
+                liqs_24h = self.buffer_manager.get_liquidations(symbol, time_window=86400)
+                liq_vol_24h = sum(float(l.get("vol", 0)) for l in liqs_24h) if liqs_24h else 0
+                uptime_hours = (datetime.now() - self.start_time).total_seconds() / 3600
+                mc.update({
+                    'liquidation_24h_volume': liq_vol_24h,
+                    'uptime_hours': uptime_hours,
+                })
 
                 # Inject track record into metadata for message_formatter
                 track_record = self.signal_tracker.get_track_record(trading_signal.signal_type)
@@ -662,6 +880,50 @@ class TeleglasPro:
                 baseline = self.buffer_manager.get_baseline(symbol)
                 trading_signal.metadata['baseline'] = baseline
 
+                # --- Leading Indicator Scoring (Upgrade 1-4) ---
+                leading_score = self.leading_scorer.score(
+                    direction=trading_signal.direction,
+                    market_context_buffer=self.market_context_buffer,
+                    base_symbol=base_symbol,
+                    signal_metadata=trading_signal.metadata,
+                )
+
+                # Override confidence if leading score is higher
+                if leading_score.total > trading_signal.confidence:
+                    self.logger.info(
+                        f"Leading score override: {trading_signal.confidence:.0f}% → "
+                        f"{leading_score.total:.0f}% ({leading_score.label_text})"
+                    )
+                    trading_signal.confidence = leading_score.total
+
+                # Store leading score in metadata for message formatter
+                trading_signal.metadata['leading_score'] = {
+                    'total': leading_score.total,
+                    'label_emoji': leading_score.label_emoji,
+                    'label_text': leading_score.label_text,
+                    'indicators': [
+                        {'name': i.name, 'points': i.points, 'detail': i.detail}
+                        for i in leading_score.indicators
+                    ],
+                    'notes': leading_score.notes,
+                    'leading_subtotal': leading_score.leading_subtotal,
+                    'lagging_subtotal': leading_score.lagging_subtotal,
+                }
+
+                # Bias override: strong leading indicators can override UNFAVORABLE filter
+                override, override_note = LeadingIndicatorScorer.should_override_bias(
+                    leading_score.leading_subtotal,
+                    filter_result.assessment,
+                    trading_signal.direction,
+                )
+                if override:
+                    filter_passed = True
+                    leading_score.notes.append(override_note)
+                    trading_signal.metadata['leading_score']['notes'] = leading_score.notes
+                    self.logger.info(f"Bias override: {override_note}")
+                else:
+                    filter_passed = filter_result.passed
+
                 # Always send to dashboard (user can see all signals in web UI)
                 dashboard_api.add_signal({
                     'symbol': symbol,
@@ -669,10 +931,11 @@ class TeleglasPro:
                     'confidence': int(trading_signal.confidence),
                     'description': f"{trading_signal.signal_type} detected",
                     'market_context': filter_result.assessment,
+                    'leading_label': leading_score.label_text,
                 })
 
                 # Check dashboard toggle AND market context filter
-                if self._is_coin_active(symbol) and filter_result.passed:
+                if self._is_coin_active(symbol) and filter_passed:
                     formatted_message = self.message_formatter.format_signal(trading_signal)
                     await self.alert_queue.add(
                         formatted_message,
@@ -771,6 +1034,7 @@ class TeleglasPro:
                 'tracker': self.signal_tracker.get_stats(),
                 'market_context_buffer': self.market_context_buffer.get_stats(),
                 'market_context_filter': self.market_context_filter.get_stats(),
+                'leading_scorer': self.leading_scorer.get_stats(),
                 'rest_poller': self.rest_poller.get_stats(),
             }
 
@@ -797,6 +1061,449 @@ class TeleglasPro:
                 await self.signal_tracker.check_outcomes()
             except Exception as e:
                 self.logger.error(f"Signal tracker error: {e}")
+
+    async def proactive_scan_task(self):
+        """
+        Proactive scan: analyze ALL polled coins every 2 minutes using leading indicators.
+
+        This is the PRIMARY signal source — does NOT depend on liquidation cascade.
+        Scans CVD flip, OI spike, funding, orderbook for each coin in REST poller.
+        """
+        self.logger.info("🔍 Proactive scanner started")
+        # Wait for first REST poll to complete
+        await asyncio.sleep(30)
+
+        while not shutdown_event.is_set():
+            try:
+                now = datetime.now()
+                symbols = list(self.rest_poller.symbols)
+                alerts_sent = 0
+
+                # Hourly rate limit: clean old entries
+                cutoff = now.timestamp() - 3600
+                self._proactive_hourly = [t for t in self._proactive_hourly if t > cutoff]
+
+                if len(self._proactive_hourly) >= self.PROACTIVE_MAX_PER_HOUR:
+                    self.logger.debug(
+                        f"Proactive hourly limit reached ({self.PROACTIVE_MAX_PER_HOUR}/hr)"
+                    )
+                else:
+                    for base_symbol in symbols:
+                        # Per-cycle limit
+                        if alerts_sent >= self.PROACTIVE_MAX_PER_CYCLE:
+                            break
+                        # Hourly limit
+                        if len(self._proactive_hourly) >= self.PROACTIVE_MAX_PER_HOUR:
+                            break
+
+                        # Check cooldown
+                        last_alert = self._proactive_cooldowns.get(base_symbol, 0)
+                        if (now.timestamp() - last_alert) < self.PROACTIVE_COOLDOWN:
+                            continue
+
+                        # Score using leading indicators
+                        # Try LONG first, then SHORT, pick the higher score
+                        score_long = self.leading_scorer.score(
+                            direction="LONG",
+                            market_context_buffer=self.market_context_buffer,
+                            base_symbol=base_symbol,
+                            signal_metadata={
+                                'market_context': self._build_context_dict(base_symbol),
+                            },
+                        )
+                        score_short = self.leading_scorer.score(
+                            direction="SHORT",
+                            market_context_buffer=self.market_context_buffer,
+                            base_symbol=base_symbol,
+                            signal_metadata={
+                                'market_context': self._build_context_dict(base_symbol),
+                            },
+                        )
+
+                        # Pick best direction
+                        if score_long.total >= score_short.total:
+                            best = score_long
+                            direction = "LONG"
+                        else:
+                            best = score_short
+                            direction = "SHORT"
+
+                        if best.total < self.PROACTIVE_MIN_SCORE:
+                            continue
+
+                        # Build and send alert
+                        ctx = self._build_context_dict(base_symbol)
+                        price = ctx.get('current_price', 0)
+
+                        msg = self._format_proactive_alert(
+                            base_symbol, direction, best, price, ctx
+                        )
+
+                        if msg and self.telegram_bot:
+                            await self.alert_queue.add(msg, priority=2)
+                            self._proactive_cooldowns[base_symbol] = now.timestamp()
+                            self._proactive_hourly.append(now.timestamp())
+                            alerts_sent += 1
+                            self.logger.info(
+                                f"🔍 Proactive signal: {base_symbol} {direction} "
+                                f"{best.total:.0f}% ({best.label_text})"
+                            )
+
+                if alerts_sent > 0:
+                    self.logger.info(f"🔍 Proactive scan: {alerts_sent} alerts from {len(symbols)} coins")
+
+                # Write live state snapshot for terminal analysis
+                self._write_live_state(symbols)
+
+            except Exception as e:
+                self.logger.error(f"Proactive scan error: {e}")
+
+            # Wait for next scan cycle
+            try:
+                await asyncio.wait_for(
+                    shutdown_event.wait(), timeout=self.PROACTIVE_SCAN_INTERVAL
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    def _write_live_state(self, symbols: list):
+        """Write JSON snapshot of all coin states for terminal analysis."""
+        try:
+            from datetime import timezone, timedelta
+            wib = timezone(timedelta(hours=7))
+            now = datetime.now(wib)
+            now_ts = int(now.timestamp())
+
+            # Read existing state to preserve accumulated history
+            existing_coins = {}
+            try:
+                with open("/tmp/tg_state.json", "r") as _ef:
+                    existing_coins = _json.load(_ef).get("coins", {})
+            except Exception:
+                pass
+
+            coins = {}
+            for base_symbol in symbols:
+                ctx = self._build_context_dict(base_symbol)
+                if not ctx:
+                    continue
+
+                score_long = self.leading_scorer.score(
+                    direction="LONG",
+                    market_context_buffer=self.market_context_buffer,
+                    base_symbol=base_symbol,
+                    signal_metadata={'market_context': ctx},
+                )
+                score_short = self.leading_scorer.score(
+                    direction="SHORT",
+                    market_context_buffer=self.market_context_buffer,
+                    base_symbol=base_symbol,
+                    signal_metadata={'market_context': ctx},
+                )
+
+                # Get Binance FR from per-exchange data
+                fpe = ctx.get('funding_per_exchange', {})
+                binance_fr = fpe.get('Binance', ctx.get('funding_rate', 0))
+
+                # CVD sparkline history — persistent across restarts
+                spot_hist = self.market_context_buffer.get_spot_cvd_history(base_symbol, 10)
+                fut_hist = self.market_context_buffer.get_futures_cvd_history(base_symbol, 10)
+
+                # Get current values
+                spot_val = spot_hist[-1].cvd_latest if spot_hist else None
+                fut_val = fut_hist[-1].cvd_latest if fut_hist else None
+
+                # Load existing history from previous state, append new value
+                prev = existing_coins.get(base_symbol, {})
+                spot_spark = prev.get('spot_cvd_spark', [])
+                fut_spark = prev.get('fut_cvd_spark', [])
+
+                if spot_val is not None:
+                    if not spot_spark or abs(spot_spark[-1] - spot_val) > 0.01:
+                        spot_spark.append(spot_val)
+                    spot_spark = spot_spark[-20:]
+
+                if fut_val is not None:
+                    if not fut_spark or abs(fut_spark[-1] - fut_val) > 0.01:
+                        fut_spark.append(fut_val)
+                    fut_spark = fut_spark[-20:]
+
+                # Taker buy/sell from latest futures CVD snapshot
+                taker_buy = 0
+                taker_sell = 0
+                if fut_hist:
+                    taker_buy = getattr(fut_hist[-1], 'taker_buy_vol', 0)
+                    taker_sell = getattr(fut_hist[-1], 'taker_sell_vol', 0)
+
+                # OI interpretation
+                oi_chg = ctx.get('oi_change_1h_pct', 0)
+                price_chg = ctx.get('price_change_24h_pct', 0)
+                if oi_chg < -0.3 and price_chg < 0:
+                    oi_interp = "DELEVERAGING"
+                elif oi_chg > 0.3 and price_chg > 0:
+                    oi_interp = "MOMENTUM VALID"
+                elif oi_chg > 0.3 and price_chg < 0:
+                    oi_interp = "SHORT ADDING"
+                elif oi_chg < -0.3 and price_chg > 0:
+                    oi_interp = "SHORT COVERING"
+                else:
+                    oi_interp = "NEUTRAL"
+
+                # Per-coin last update timestamp
+                last_ts = None
+                if spot_hist:
+                    last_ts = getattr(spot_hist[-1], 'timestamp', None)
+                elif fut_hist:
+                    last_ts = getattr(fut_hist[-1], 'timestamp', None)
+                updated_str = ""
+                if last_ts:
+                    from datetime import timezone as _tz, timedelta as _td
+                    try:
+                        updated_str = datetime.fromtimestamp(last_ts, tz=_tz(_td(hours=7))).strftime('%H:%M:%S')
+                    except Exception:
+                        pass
+
+                coins[base_symbol] = {
+                    "price": ctx.get('current_price', 0),
+                    "change_24h": ctx.get('price_change_24h_pct', 0),
+                    "volume_24h": ctx.get('volume_24h', 0),
+                    "oi_usd": ctx.get('oi_usd', 0),
+                    "oi_change_1h": ctx.get('oi_change_1h_pct', 0),
+                    "oi_interp": oi_interp,
+                    "funding_rate": binance_fr,
+                    "taker_buy_vol": taker_buy,
+                    "taker_sell_vol": taker_sell,
+                    "spot_cvd": ctx.get('spot_cvd_latest', 0),
+                    "spot_cvd_dir": ctx.get('spot_cvd_direction', 'UNKNOWN'),
+                    "spot_cvd_slope": ctx.get('spot_cvd_slope', 0),
+                    "spot_cvd_spark": spot_spark,
+                    "fut_cvd": ctx.get('futures_cvd_latest', 0),
+                    "fut_cvd_dir": ctx.get('futures_cvd_direction', 'UNKNOWN'),
+                    "fut_cvd_slope": ctx.get('futures_cvd_slope', 0),
+                    "fut_cvd_spark": fut_spark,
+                    "ob_bid": ctx.get('orderbook_bid_vol', 0),
+                    "ob_ask": ctx.get('orderbook_ask_vol', 0),
+                    "ob_dominant": ctx.get('orderbook_dominant', 'UNKNOWN'),
+                    "long_score": score_long.total,
+                    "short_score": score_short.total,
+                    "long_label": score_long.label_text,
+                    "short_label": score_short.label_text,
+                    "bias": "LONG" if score_long.total > score_short.total else "SHORT" if score_short.total > score_long.total else "NEUTRAL",
+                    "updated": updated_str,
+                }
+
+            whale_alerts = getattr(self, '_recent_whale_alerts', [])
+
+            # FR extremes: top 3 most negative + top 3 most positive across all coins
+            fr_items = [(sym, d.get('funding_rate', 0)) for sym, d in coins.items() if d.get('funding_rate', 0) != 0]
+            fr_sorted = sorted(fr_items, key=lambda x: x[1])
+            fr_extremes = {
+                "most_negative": [{"coin": s, "fr": v} for s, v in fr_sorted[:3]],
+                "most_positive": [{"coin": s, "fr": v} for s, v in fr_sorted[-3:][::-1]],
+            }
+
+            state = {
+                "timestamp": now.strftime('%Y-%m-%d %H:%M:%S WIB'),
+                "coins_count": len(coins),
+                "uptime_min": round((datetime.now() - self.start_time).total_seconds() / 60, 1),
+                "stats": self.stats,
+                "coins": coins,
+                "whale_alerts": whale_alerts,
+                "fr_extremes": fr_extremes,
+            }
+
+            state_json = _json.dumps(state, indent=2, default=str)
+
+            # Write to internal state
+            state_path = Path("data/live_state.json")
+            tmp_path = state_path.with_suffix('.tmp')
+            with open(tmp_path, 'w') as f:
+                f.write(state_json)
+            tmp_path.replace(state_path)
+
+            # Write to dashboard state
+            dash_path = Path("/tmp/tg_state.json")
+            dash_tmp = dash_path.with_suffix('.tmp')
+            with open(dash_tmp, 'w') as f:
+                f.write(state_json)
+            dash_tmp.replace(dash_path)
+
+        except Exception as e:
+            self.logger.error(f"State write error: {e}")
+
+    def _build_context_dict(self, base_symbol: str) -> dict:
+        """Build market context dict from buffer for a base symbol."""
+        ctx = {}
+
+        # OI
+        oi = self.market_context_buffer.get_latest_oi(base_symbol)
+        if oi:
+            ctx['oi_usd'] = oi.current_oi_usd
+            ctx['oi_change_1h_pct'] = oi.oi_change_pct
+
+        # Funding
+        funding = self.market_context_buffer.get_latest_funding(base_symbol)
+        if funding:
+            ctx['funding_rate'] = funding.current_rate
+
+        # Funding per exchange
+        fpe = self.market_context_buffer.get_funding_per_exchange(base_symbol)
+        if fpe:
+            ctx['funding_per_exchange'] = fpe.rates
+
+        # CVD
+        spot = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
+        if spot:
+            ctx['spot_cvd_direction'] = spot.cvd_direction
+            ctx['spot_cvd_latest'] = spot.cvd_latest
+            ctx['spot_cvd_slope'] = spot.cvd_slope
+
+        fut = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
+        if fut:
+            ctx['futures_cvd_direction'] = fut.cvd_direction
+            ctx['futures_cvd_latest'] = fut.cvd_latest
+            ctx['futures_cvd_slope'] = fut.cvd_slope
+
+        # Orderbook
+        ob = self.market_context_buffer.get_latest_orderbook(base_symbol)
+        if ob:
+            ctx['orderbook_dominant'] = ob.dominant_side
+            ctx['orderbook_bid_vol'] = ob.total_bid_vol
+            ctx['orderbook_ask_vol'] = ob.total_ask_vol
+
+        # Price
+        price = self.market_context_buffer.get_latest_price(base_symbol)
+        if price:
+            ctx['current_price'] = price.price
+            ctx['price_change_24h_pct'] = price.change_24h_pct
+            ctx['volume_24h'] = price.volume_24h
+
+        return ctx
+
+    def _format_proactive_alert(
+        self, symbol: str, direction: str, score, price: float, ctx: dict
+    ) -> str:
+        """Format proactive scan alert for Telegram (data-first, same depth as Stop Hunt)."""
+        dir_emoji = "\U0001f4c8" if direction == "LONG" else "\U0001f4c9"
+        fmt = self.message_formatter
+
+        # --- Header ---
+        from datetime import timezone, timedelta
+        wib = timezone(timedelta(hours=7))
+        time_str = datetime.now(wib).strftime('%H:%M:%S')
+        price_str = fmt.format_price(price) if price > 0 else "N/A"
+        header = f"\U0001f4a1 *{symbol}* | {price_str} | {time_str} WIB"
+
+        # --- Trigger: Leading Indicator ---
+        trigger_lines = [f"\U0001f514 *Trigger: LEADING SCAN* | {direction}"]
+        for ind in score.indicators:
+            if ind.detail:
+                trigger_lines.append(f"\u2726 {ind.detail}")
+        for note in score.notes:
+            trigger_lines.append(f"\u2726 {note}")
+        trigger = "\n".join(trigger_lines)
+
+        # --- Order Flow ---
+        of_lines = []
+        has_spot = ctx.get('spot_cvd_direction', 'UNKNOWN') != 'UNKNOWN'
+        has_fut = ctx.get('futures_cvd_direction', 'UNKNOWN') != 'UNKNOWN'
+        has_oi = ctx.get('oi_usd', 0) > 0
+        has_ob = ctx.get('orderbook_dominant', 'UNKNOWN') != 'UNKNOWN'
+
+        if any([has_spot, has_fut, has_oi, has_ob]):
+            of_lines.append("\U0001f4ca *ORDER FLOW*")
+            if has_spot:
+                arrow = fmt._dir_arrow(ctx['spot_cvd_direction'])
+                of_lines.append(f"SpotCVD  : {fmt._fmt_value(ctx.get('spot_cvd_latest', 0))} {arrow} slope:{fmt._fmt_value(ctx.get('spot_cvd_slope', 0))}/5m")
+            if has_fut:
+                arrow = fmt._dir_arrow(ctx['futures_cvd_direction'])
+                of_lines.append(f"FutCVD   : {fmt._fmt_value(ctx.get('futures_cvd_latest', 0))} {arrow} slope:{fmt._fmt_value(ctx.get('futures_cvd_slope', 0))}/5m")
+            if has_spot or has_fut:
+                of_lines.append(f"CVD sync : {ctx.get('cvd_alignment', 'NEUTRAL')}")
+            if has_oi:
+                oi_change = ctx.get('oi_change_1h_pct', 0)
+                oi_arrow = "\u25b2" if oi_change > 0 else "\u25bc" if oi_change < 0 else "\u25b6"
+                of_lines.append(f"OI       : {fmt._fmt_large_usd(ctx['oi_usd'])} {oi_arrow} {oi_change:+.1f}% 1h [{ctx.get('oi_alignment', 'NEUTRAL')}]")
+            if has_ob:
+                bid = ctx.get('orderbook_bid_vol', 0)
+                ask = ctx.get('orderbook_ask_vol', 0)
+                total = bid + ask
+                bid_pct = (bid / total * 100) if total > 0 else 50
+                of_lines.append(f"OBDelta  : Bid {fmt._fmt_large_usd(bid)} ({bid_pct:.0f}%) / Ask {fmt._fmt_large_usd(ask)} ({100-bid_pct:.0f}%)")
+        order_flow = "\n".join(of_lines)
+
+        # --- Funding Rate ---
+        fr_lines = []
+        per_exchange = ctx.get('funding_per_exchange', {})
+        fr = ctx.get('funding_rate', 0)
+        if per_exchange:
+            fr_lines.append("\U0001f4b8 *FUNDING RATE*")
+            for exchange, rate in sorted(per_exchange.items(), key=lambda x: abs(x[1]), reverse=True)[:5]:
+                fr_lines.append(f"{exchange:9s}: {rate*100:+.4f}%")
+            fr_lines.append(f"Alignment: {ctx.get('funding_alignment', 'NEUTRAL')}")
+        elif fr != 0:
+            fr_lines.append("\U0001f4b8 *FUNDING RATE*")
+            fr_lines.append(f"Avg      : {fr*100:+.4f}%")
+            fr_lines.append(f"Alignment: {ctx.get('funding_alignment', 'NEUTRAL')}")
+        funding = "\n".join(fr_lines)
+
+        # --- Whale ---
+        whale_lines = []
+        whale_val = ctx.get('whale_largest_value_usd', 0)
+        if whale_val >= 1_000_000:
+            whale_lines.append("\U0001f40b *WHALE (Hyperliquid)*")
+            w_dir = (ctx.get('whale_largest_direction', '') or '?').upper()
+            detail = f"{w_dir} {fmt._fmt_large_usd(whale_val)}"
+            w_entry = ctx.get('whale_entry_price', 0)
+            w_liq = ctx.get('whale_liq_price', 0)
+            if w_entry > 0:
+                detail += f" @ {fmt.format_price(w_entry)}"
+            if w_liq > 0:
+                detail += f" | Liq: {fmt.format_price(w_liq)}"
+            detail += f" [{ctx.get('whale_alignment', 'NEUTRAL')}]"
+            whale_lines.append(detail)
+        whale = "\n".join(whale_lines)
+
+        # --- Price Action ---
+        pa_lines = []
+        volume = ctx.get('volume_24h', 0)
+        change = ctx.get('price_change_24h_pct', 0)
+        if price > 0 or volume > 0:
+            pa_lines.append("\U0001f4c8 *PRICE ACTION*")
+            if price > 0:
+                if change != 0:
+                    pa_lines.append(f"Harga    : {price_str} ({change:+.1f}% 24h)")
+                else:
+                    pa_lines.append(f"Harga    : {price_str}")
+            if volume > 0:
+                pa_lines.append(f"Volume   : {fmt._fmt_large_usd(volume)}")
+        price_action = "\n".join(pa_lines)
+
+        # --- Bias line ---
+        bar = fmt.create_progress_bar(score.total, length=10)
+        assessment = ctx.get('combined_assessment', '')
+        assess_line = ""
+        if assessment:
+            assess_emoji = {"FAVORABLE": "\u2705", "NEUTRAL": "\u2796", "UNFAVORABLE": "\u274c"}.get(assessment, "")
+            assess_line = f"\nContext  : {assess_emoji} {assessment}"
+
+        label = f"{score.label_emoji} {direction} {dir_emoji} \u2014 {score.label_text}" if score.label_text else f"\U0001f4a1 {direction} {dir_emoji}"
+        bias = f"{label}\n{bar} {score.total:.0f}%{assess_line}\n\u26a0\ufe0f DYOR \u2014 verifikasi sebelum entry"
+
+        # --- Assemble ---
+        sections = [header, trigger]
+        if order_flow:
+            sections.append(order_flow)
+        if funding:
+            sections.append(funding)
+        if whale:
+            sections.append(whale)
+        if price_action:
+            sections.append(price_action)
+        sections.append(bias)
+
+        return "\n\n".join(sections)
 
     async def dynamic_subscription_task(self):
         """
@@ -970,6 +1677,7 @@ class TeleglasPro:
                 asyncio.create_task(self.signal_tracker_task()),
                 asyncio.create_task(self.dynamic_subscription_task()),
                 asyncio.create_task(self.rest_poller.start(shutdown_event)),
+                asyncio.create_task(self.proactive_scan_task()),
             ]
             
             self.logger.info("=" * 60)
@@ -1110,14 +1818,22 @@ def load_config() -> dict:
             },
             'dashboard': {
                 'api_token': '',
-                'cors_origins': ['http://localhost:3000', 'http://localhost:8080']
+                'cors_origins': ['http://localhost:3000', 'http://127.0.0.1:8081', 'https://teleglas.guardiansofthetoken.org']
             },
             'market_context': {
                 'enabled': True,
                 'poll_interval': 300,
                 'max_snapshots': 72,
                 'filter_mode': 'normal',
-                'confidence_adjust': True
+                'confidence_adjust': True,
+                'cvd_enabled': True,
+                'cvd_interval': '5m',
+                'cvd_lookback': 12,
+                'whale_enabled': True,
+                'whale_veto_threshold': 5_000_000,
+                'whale_caution_threshold': 1_000_000,
+                'orderbook_enabled': True,
+                'price_enabled': True,
             }
         }
     

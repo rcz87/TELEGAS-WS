@@ -20,19 +20,19 @@ thresholds:
   absorption_minimum: 100000    # $100K
   
   # Order Flow Analyzer
-  large_order_threshold: 10000  # $10K
-  accumulation_ratio: 0.65      # 65% buy ratio
-  distribution_ratio: 0.35      # 35% buy ratio
-  min_large_orders: 3           # Minimum whale orders
+  large_order_threshold: 25000  # $25K (filter out noise)
+  accumulation_ratio: 0.72      # 72% buy ratio (strong accumulation only)
+  distribution_ratio: 0.28      # 28% buy ratio (strong distribution only)
+  min_large_orders: 5           # Minimum whale orders (need more confirmation)
   
   # Event Pattern Detector
   funding_rate_extreme: 0.001   # 0.1%
 
 # Signal Settings
 signals:
-  min_confidence: 70.0           # Minimum confidence to send alert
-  max_signals_per_hour: 50       # Rate limit
-  cooldown_minutes: 5            # Cooldown between same signals
+  min_confidence: 70.0           # Lowered from 78 — CVD VETO hard block handles quality
+  max_signals_per_hour: 10       # Rate limit (quality over quantity)
+  cooldown_minutes: 15           # Cooldown between same signals
 
 # Alert Settings
 alerts:
@@ -40,9 +40,9 @@ alerts:
   max_retries: 3                 # Retry attempts on failure
   
   # Alert priorities
-  urgent_threshold: 85           # Confidence for URGENT
-  watch_threshold: 70            # Confidence for WATCH
-  info_threshold: 60             # Confidence for INFO
+  urgent_threshold: 92           # Confidence for URGENT (very high conviction)
+  watch_threshold: 85            # Confidence for WATCH
+  info_threshold: 70             # Confidence for INFO (minimum quality)
 
 # Buffer Settings
 buffers:
@@ -73,8 +73,8 @@ dashboard:
   api_token: "GANTI_DENGAN_TOKEN_RANDOM_YANG_PANJANG"
   cors_origins:
     - "http://localhost:3000"
-    - "http://localhost:8080"
-    # Add your VPS IP here: "http://YOUR_VPS_IP:8080"
+    - "http://127.0.0.1:8081"
+    - "https://teleglas.guardiansofthetoken.org"
 
 # Dynamic Coin Monitoring
 # mode: "all" = process ALL coins from CoinGlass (recommended)
@@ -82,47 +82,229 @@ dashboard:
 monitoring:
   mode: "all"
 
-  # Coin Tier Classification for dynamic thresholds
-  # Tier 1: Major coins - highest thresholds
-  # Tier 2: Mid-cap coins - medium thresholds
-  # Tier 3: Everything else (small coins) - lowest thresholds
+  # 4-Tier Classification
+  # Tier 1: Mega cap — most liquid, highest thresholds
+  # Tier 2: Large cap — medium thresholds
+  # Tier 3: Mid cap — lower thresholds
+  # Tier 4: Small cap / meme — lowest thresholds, extra caution
+
   tier1_symbols:
     - BTCUSDT
     - ETHUSDT
+
   tier2_symbols:
-    - BNBUSDT
     - SOLUSDT
+    - BNBUSDT
     - XRPUSDT
-    - ADAUSDT
     - DOGEUSDT
     - AVAXUSDT
-    - MATICUSDT
+    - SUIUSDT
+    - ADAUSDT
     - DOTUSDT
     - LINKUSDT
     - LTCUSDT
     - UNIUSDT
     - AAVEUSDT
+    - MATICUSDT
+
+  tier3_symbols:
+    - TRUMPUSDT
+    - HYPEUSDT
+    - TAOUSDT
+    - JUPUSDT
+    - ONDOUSDT
+    - ENAUSDT
+    - ARBUSDT
+    - OPUSDT
+    - APTUSDT
+    - SEIUSDT
+    - TIAUSDT
+    - INJUSDT
+    - FETUSDT
+    - RENDERUSDT
+    - STXUSDT
+    - NEARUSDT
+    - BCHUSDT
+    - FILUSDT
+    - ATOMUSDT
+    - MKRUSDT
+    - WIFUSDT
+    - PEPEUSDT
+    - XAUUSDT
+    - XAGUSDT
+    - PAXGUSDT
+
+  # Tier 4 = everything not in tier 1/2/3 (dynamic)
+
+  # Cooldown per tier (minutes) — prevents duplicate alerts per coin
+  tier1_cooldown_minutes: 120      # BTC, ETH — 2 hours
+  tier2_cooldown_minutes: 60       # Large caps — 1 hour
+  tier3_cooldown_minutes: 45       # Mid caps — 45 min
+  tier4_cooldown_minutes: 30       # Small caps — 30 min
+
+  # Minimum 24h volume per tier (USD) — skip low-volume coins
+  tier1_min_volume_24h: 100000000  # $100M
+  tier2_min_volume_24h: 50000000   # $50M
+  tier3_min_volume_24h: 15000000   # $15M
+  tier4_min_volume_24h: 5000000    # $5M
 
   # Liquidation cascade thresholds per tier
-  tier1_cascade: 2000000         # $2M for BTC, ETH
-  tier2_cascade: 200000          # $200K for mid-caps
-  tier3_cascade: 50000           # $50K for small coins
+  tier1_cascade: 3000000         # $3M for BTC, ETH
+  tier2_cascade: 500000          # $500K for large caps
+  tier3_cascade: 150000          # $150K for mid caps
+  tier4_cascade: 50000           # $50K for small caps
 
   # Absorption thresholds per tier
-  tier1_absorption: 100000       # $100K
-  tier2_absorption: 20000        # $20K
-  tier3_absorption: 5000         # $5K
+  tier1_absorption: 200000       # $200K
+  tier2_absorption: 50000        # $50K
+  tier3_absorption: 15000        # $15K
+  tier4_absorption: 5000         # $5K
+
+  # CVD flip minimum value per tier (absolute cum_vol_delta)
+  tier1_cvd_flip_min: 2000000    # $2M
+  tier2_cvd_flip_min: 500000     # $500K
+  tier3_cvd_flip_min: 100000     # $100K
+  tier4_cvd_flip_min: 30000      # $30K
+
+  # OI minimum for signal validity
+  tier1_oi_min: 500000000        # $500M
+  tier2_oi_min: 50000000         # $50M
+  tier3_oi_min: 10000000         # $10M
+  tier4_oi_min: 1000000          # $1M
+
+  # FR extreme auto-skip (funding rate above this = skip signal for tier 3/4)
+  fr_extreme_threshold: 0.01     # 1% per interval = extreme
 
   # Max concurrent analysis tasks (resource management)
   max_concurrent_analysis: 30
 
+# Proactive Scanner Watchlist — coins scanned every 2 minutes
+# These are polled via REST for leading indicator scoring
+watchlist:
+  # Tier 1 — Mega cap
+  - BTC
+  - ETH
+  # Tier 2 — Large cap
+  - SOL
+  - BNB
+  - XRP
+  - DOGE
+  - ADA
+  - AVAX
+  - SUI
+  - LINK
+  - DOT
+  - LTC
+  - BCH
+  - UNI
+  - AAVE
+  # Tier 3 — Mid cap / trending
+  - HYPE
+  - TRUMP
+  - NEAR
+  - PEPE
+  - WIF
+  - ONDO
+  - TAO
+  - JUP
+  - ENA
+  - ARB
+  - OP
+  - APT
+  - SEI
+  - TIA
+  - INJ
+  - FET
+  - RENDER
+  - STX
+  - MATIC
+  - MKR
+  - FIL
+  - ATOM
+  - TON
+  - TRX
+  - SHIB
+  - BONK
+  - FLOKI
+  - WLD
+  - PENDLE
+  - DYDX
+  - IMX
+  - GRT
+  - ALGO
+  - SAND
+  - MANA
+  - AXS
+  - CRV
+  - SNX
+  - COMP
+  - SUSHI
+  - RUNE
+  - EGLD
+  - FLOW
+  - MINA
+  - CELO
+  - KAVA
+  - ZIL
+  - GALA
+  - ENJ
+  - CHZ
+  - MASK
+  - LDO
+  - RPL
+  - SSV
+  - GMX
+  - DESO
+  - BLUR
+  - MAGIC
+  - JTO
+  - PYTH
+  - W
+  - STRK
+  - ZK
+  - EIGEN
+  - ETHFI
+  - REZ
+  - ZRO
+  - IO
+  - NOT
+  - DOGS
+  - HMSTR
+  - CATI
+  - NEIRO
+  - ACT
+  - PNUT
+  - MOVE
+  - ME
+  - PENGU
+  - USUAL
+  - BIO
+  - VIRTUAL
+  - AI16Z
+  - FARTCOIN
+  - GRIFFAIN
+  - SONIC
+  - MELANIA
+  # Commodities
+  - XAU
+  - XAG
+  - PAXG
+
 # Market Context (OI + Funding Rate from CoinGlass REST API)
 market_context:
   enabled: true
-  poll_interval: 300             # Seconds between REST API polls (5 minutes)
+  poll_interval: 120             # Seconds between REST API polls (2 minutes)
   max_snapshots: 72              # Rolling buffer size per symbol (6 hours at 5-min)
   filter_mode: "normal"          # "strict" = only FAVORABLE, "normal" = block UNFAVORABLE, "permissive" = pass all
   confidence_adjust: true        # Adjust confidence based on market context
+  cvd_enabled: true              # Fetch SpotCVD + FuturesCVD from CoinGlass
+  cvd_interval: "5m"             # CVD candle interval
+  cvd_lookback: 12               # Number of CVD candles to fetch
+  whale_enabled: true             # Fetch Hyperliquid whale alerts
+  whale_veto_threshold: 5000000   # $5M+ whale opposing = VETO
+  whale_caution_threshold: 1000000  # $1M+ whale opposing = CAUTION
+  orderbook_enabled: true           # Fetch orderbook bid/ask imbalance
+  price_enabled: true               # Fetch price OHLC + volume
 
 # Analysis Windows
 analysis:

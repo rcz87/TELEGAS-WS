@@ -117,11 +117,18 @@ class ConfidenceScorer:
                 adjusted += quality_boost
                 if quality_boost != 0:
                     self.logger.debug(f"Quality adjustment: {quality_boost:+.1f}%")
+
+            # Factor 4: Combination bonuses (makes scores more varied)
+            if metadata:
+                combo_boost = self._calculate_combo_bonus(metadata)
+                adjusted += combo_boost
+                if combo_boost != 0:
+                    self.logger.debug(f"Combo bonus: {combo_boost:+.0f}%")
             
             self._scores_calculated += 1
             
-            # Ensure bounds
-            return max(50.0, min(adjusted, 99.0))
+            # Ensure bounds — floor at 55 so marginal signals don't pass 78% threshold easily
+            return max(55.0, min(adjusted, 99.0))
             
         except Exception as e:
             self.logger.error(f"Confidence adjustment failed: {e}")
@@ -135,6 +142,42 @@ class ConfidenceScorer:
             return self._tier2_absorption
         else:
             return self._tier3_absorption
+
+    def _calculate_combo_bonus(self, metadata: dict) -> float:
+        """
+        Calculate combination bonuses when multiple indicators align.
+
+        Bonus 1: SpotCVD + FutCVD both same direction = +10
+        Bonus 2: CVD Acceleration + OBDelta same direction = +10
+
+        Returns:
+            Combo bonus value (0, 10, or 20)
+        """
+        bonus = 0.0
+        ctx = metadata.get('market_context', {})
+        if not ctx:
+            return 0.0
+
+        # Bonus 1: SpotCVD + FutCVD alignment
+        spot_dir = ctx.get('spot_cvd_direction', 'UNKNOWN')
+        fut_dir = ctx.get('futures_cvd_direction', 'UNKNOWN')
+        if spot_dir != 'UNKNOWN' and fut_dir != 'UNKNOWN' and spot_dir == fut_dir:
+            bonus += 10
+            self.logger.debug(f"Combo: SpotCVD + FutCVD both {spot_dir} → +10")
+
+        # Bonus 2: CVD Acceleration + OBDelta alignment
+        # CVD acceleration = slope direction (positive slope = RISING = buying pressure)
+        spot_slope = ctx.get('spot_cvd_slope', 0)
+        fut_slope = ctx.get('futures_cvd_slope', 0)
+        avg_slope = (spot_slope + fut_slope) / 2 if (spot_slope or fut_slope) else 0
+        cvd_accel_dir = 'BIDS' if avg_slope > 0 else 'ASKS' if avg_slope < 0 else None
+
+        ob_dominant = ctx.get('orderbook_dominant', 'UNKNOWN')
+        if cvd_accel_dir and ob_dominant in ('BIDS', 'ASKS') and cvd_accel_dir == ob_dominant:
+            bonus += 10
+            self.logger.debug(f"Combo: CVD accel + OBDelta both {ob_dominant} → +10")
+
+        return bonus
 
     def calculate_quality_boost(self, metadata: dict, symbol: str = "") -> float:
         """
@@ -156,7 +199,9 @@ class ConfidenceScorer:
             # Absorption relative to tier threshold (fair for all coins)
             absorption = sh.get('absorption_volume', 0)
             abs_threshold = self._get_absorption_threshold(symbol)
-            if absorption > abs_threshold * 5:
+            if absorption <= 0:
+                boost -= 3  # No absorption = negative quality signal
+            elif absorption > abs_threshold * 5:
                 boost += 2
             elif absorption > abs_threshold * 2:
                 boost += 1

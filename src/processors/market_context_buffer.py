@@ -21,7 +21,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, List, Optional
 
 from ..utils.logger import setup_logger
 
@@ -42,6 +42,34 @@ class MarketContext:
     funding_alignment: str = "NEUTRAL"
     oi_alignment: str = "NEUTRAL"
     combined_assessment: str = "NEUTRAL"
+
+    # CVD data
+    spot_cvd_direction: str = "UNKNOWN"
+    spot_cvd_slope: float = 0.0
+    spot_cvd_latest: float = 0.0
+    futures_cvd_direction: str = "UNKNOWN"
+    futures_cvd_slope: float = 0.0
+    futures_cvd_latest: float = 0.0
+    cvd_alignment: str = "NEUTRAL"
+
+    # Whale data
+    whale_conflicting: bool = False
+    whale_largest_value_usd: float = 0.0
+    whale_largest_direction: str = ""
+    whale_alignment: str = "NEUTRAL"
+
+    # Orderbook data
+    orderbook_bid_vol: float = 0.0
+    orderbook_ask_vol: float = 0.0
+    orderbook_dominant: str = "UNKNOWN"
+
+    # Per-exchange funding rates
+    funding_per_exchange: dict = field(default_factory=dict)
+
+    # Price data
+    current_price: float = 0.0
+    price_change_24h_pct: float = 0.0
+    volume_24h: float = 0.0
 
     timestamp: float = field(default_factory=time.time)
 
@@ -64,6 +92,12 @@ class MarketContextBuffer:
         self.max_snapshots = max_snapshots
         self._oi_buffers: Dict[str, deque] = {}
         self._funding_buffers: Dict[str, deque] = {}
+        self._spot_cvd_buffers: Dict[str, deque] = {}
+        self._futures_cvd_buffers: Dict[str, deque] = {}
+        self._whale_positions: Dict[str, list] = {}  # symbol -> list of WhaleAlert
+        self._orderbook_buffers: Dict[str, deque] = {}
+        self._funding_per_exchange: Dict[str, object] = {}  # symbol -> latest FundingPerExchange
+        self._price_buffers: Dict[str, deque] = {}
         self._lock = threading.Lock()
         self.logger = setup_logger("MarketContextBuffer", "INFO")
 
@@ -118,6 +152,109 @@ class MarketContextBuffer:
             return None
         return (latest.current_oi_usd - previous.current_oi_usd) / previous.current_oi_usd * 100
 
+    def add_spot_cvd_snapshot(self, snapshot):
+        """Add spot CVD snapshot (from rest_poller.CVDSnapshot)."""
+        with self._lock:
+            if snapshot.symbol not in self._spot_cvd_buffers:
+                self._spot_cvd_buffers[snapshot.symbol] = deque(maxlen=self.max_snapshots)
+            self._spot_cvd_buffers[snapshot.symbol].append(snapshot)
+
+    def add_futures_cvd_snapshot(self, snapshot):
+        """Add futures CVD snapshot (from rest_poller.CVDSnapshot)."""
+        with self._lock:
+            if snapshot.symbol not in self._futures_cvd_buffers:
+                self._futures_cvd_buffers[snapshot.symbol] = deque(maxlen=self.max_snapshots)
+            self._futures_cvd_buffers[snapshot.symbol].append(snapshot)
+
+    def get_latest_spot_cvd(self, symbol: str):
+        """Get most recent spot CVD snapshot for symbol."""
+        with self._lock:
+            buf = self._spot_cvd_buffers.get(symbol, deque())
+            return buf[-1] if buf else None
+
+    def get_latest_futures_cvd(self, symbol: str):
+        """Get most recent futures CVD snapshot for symbol."""
+        with self._lock:
+            buf = self._futures_cvd_buffers.get(symbol, deque())
+            return buf[-1] if buf else None
+
+    def update_whale_positions(self, alerts: list):
+        """
+        Update whale positions from a list of WhaleAlert objects.
+
+        Replaces the full whale position list per symbol (fresh each poll cycle).
+        """
+        with self._lock:
+            # Group by symbol
+            by_symbol: Dict[str, list] = {}
+            for alert in alerts:
+                by_symbol.setdefault(alert.symbol, []).append(alert)
+            # Replace stored positions per symbol
+            for symbol, positions in by_symbol.items():
+                self._whale_positions[symbol] = positions
+
+    def get_whale_positions(self, symbol: str, min_value_usd: float = 0) -> list:
+        """Get whale positions for a symbol, optionally filtered by min value."""
+        with self._lock:
+            positions = self._whale_positions.get(symbol, [])
+            if min_value_usd > 0:
+                return [p for p in positions if p.position_value_usd >= min_value_usd]
+            return list(positions)
+
+    def add_orderbook_snapshot(self, snapshot):
+        """Add orderbook delta snapshot."""
+        with self._lock:
+            if snapshot.symbol not in self._orderbook_buffers:
+                self._orderbook_buffers[snapshot.symbol] = deque(maxlen=self.max_snapshots)
+            self._orderbook_buffers[snapshot.symbol].append(snapshot)
+
+    def get_latest_orderbook(self, symbol: str):
+        """Get most recent orderbook delta for symbol."""
+        with self._lock:
+            buf = self._orderbook_buffers.get(symbol, deque())
+            return buf[-1] if buf else None
+
+    def update_funding_per_exchange(self, snapshot):
+        """Store latest per-exchange funding rates (replaces previous)."""
+        with self._lock:
+            self._funding_per_exchange[snapshot.symbol] = snapshot
+
+    def get_funding_per_exchange(self, symbol: str):
+        """Get per-exchange funding rates."""
+        with self._lock:
+            return self._funding_per_exchange.get(symbol)
+
+    def add_price_snapshot(self, snapshot):
+        """Add price snapshot."""
+        with self._lock:
+            if snapshot.symbol not in self._price_buffers:
+                self._price_buffers[snapshot.symbol] = deque(maxlen=self.max_snapshots)
+            self._price_buffers[snapshot.symbol].append(snapshot)
+
+    def get_latest_price(self, symbol: str):
+        """Get most recent price snapshot for symbol."""
+        with self._lock:
+            buf = self._price_buffers.get(symbol, deque())
+            return buf[-1] if buf else None
+
+    def get_spot_cvd_history(self, symbol: str, n: int = 6) -> list:
+        """Get last N spot CVD snapshots for symbol."""
+        with self._lock:
+            buf = list(self._spot_cvd_buffers.get(symbol, deque()))
+            return buf[-n:] if buf else []
+
+    def get_futures_cvd_history(self, symbol: str, n: int = 6) -> list:
+        """Get last N futures CVD snapshots for symbol."""
+        with self._lock:
+            buf = list(self._futures_cvd_buffers.get(symbol, deque()))
+            return buf[-n:] if buf else []
+
+    def get_oi_history(self, symbol: str, n: int = 6) -> list:
+        """Get last N OI snapshots for symbol."""
+        with self._lock:
+            buf = list(self._oi_buffers.get(symbol, deque()))
+            return buf[-n:] if buf else []
+
     def evaluate_context(self, symbol: str, signal_direction: str) -> Optional[MarketContext]:
         """
         Evaluate full market context for a symbol + signal direction.
@@ -142,12 +279,60 @@ class MarketContextBuffer:
         # OI change: use pre-calculated change from rest_poller (current vs previous candle)
         oi_change_1h = latest_oi.oi_change_pct if latest_oi else 0
 
+        # CVD data
+        spot_cvd = self.get_latest_spot_cvd(symbol)
+        futures_cvd = self.get_latest_futures_cvd(symbol)
+
+        spot_cvd_direction = spot_cvd.cvd_direction if spot_cvd else "UNKNOWN"
+        spot_cvd_slope = spot_cvd.cvd_slope if spot_cvd else 0.0
+        spot_cvd_latest = spot_cvd.cvd_latest if spot_cvd else 0.0
+        futures_cvd_direction = futures_cvd.cvd_direction if futures_cvd else "UNKNOWN"
+        futures_cvd_slope = futures_cvd.cvd_slope if futures_cvd else 0.0
+        futures_cvd_latest = futures_cvd.cvd_latest if futures_cvd else 0.0
+
+        # Whale data
+        whale_positions = self.get_whale_positions(symbol, min_value_usd=1_000_000)
+        whale_conflicting = False
+        whale_largest_value = 0.0
+        whale_largest_dir = ""
+        for wp in whale_positions:
+            if wp.direction != signal_direction:
+                whale_conflicting = True
+                if wp.position_value_usd > whale_largest_value:
+                    whale_largest_value = wp.position_value_usd
+                    whale_largest_dir = wp.direction
+
+        # Orderbook data
+        orderbook = self.get_latest_orderbook(symbol)
+        ob_bid_vol = orderbook.total_bid_vol if orderbook else 0.0
+        ob_ask_vol = orderbook.total_ask_vol if orderbook else 0.0
+        ob_dominant = orderbook.dominant_side if orderbook else "UNKNOWN"
+
+        # Per-exchange funding
+        fpe = self.get_funding_per_exchange(symbol)
+        fpe_rates = fpe.rates if fpe else {}
+
+        # Price data
+        price_snap = self.get_latest_price(symbol)
+        current_price = price_snap.price if price_snap else 0.0
+        price_change_24h = price_snap.change_24h_pct if price_snap else 0.0
+        volume_24h = price_snap.volume_24h if price_snap else 0.0
+
         # Assessments
         funding_alignment = self._assess_funding_alignment(
             current_funding, signal_direction
         )
         oi_alignment = self._assess_oi_alignment(oi_change_1h)
-        combined = self._assess_combined(funding_alignment, oi_alignment)
+        cvd_alignment = self._assess_cvd_alignment(
+            spot_cvd_direction, futures_cvd_direction, signal_direction
+        )
+        whale_alignment = self._assess_whale_alignment(
+            whale_conflicting, whale_largest_value
+        )
+        combined = self._assess_combined(
+            funding_alignment, oi_alignment,
+            cvd_alignment=cvd_alignment, whale_alignment=whale_alignment,
+        )
 
         return MarketContext(
             symbol=symbol,
@@ -157,6 +342,24 @@ class MarketContextBuffer:
             funding_alignment=funding_alignment,
             oi_alignment=oi_alignment,
             combined_assessment=combined,
+            spot_cvd_direction=spot_cvd_direction,
+            spot_cvd_slope=spot_cvd_slope,
+            spot_cvd_latest=spot_cvd_latest,
+            futures_cvd_direction=futures_cvd_direction,
+            futures_cvd_slope=futures_cvd_slope,
+            futures_cvd_latest=futures_cvd_latest,
+            cvd_alignment=cvd_alignment,
+            whale_conflicting=whale_conflicting,
+            whale_largest_value_usd=whale_largest_value,
+            whale_largest_direction=whale_largest_dir,
+            whale_alignment=whale_alignment,
+            orderbook_bid_vol=ob_bid_vol,
+            orderbook_ask_vol=ob_ask_vol,
+            orderbook_dominant=ob_dominant,
+            funding_per_exchange=fpe_rates,
+            current_price=current_price,
+            price_change_24h_pct=price_change_24h,
+            volume_24h=volume_24h,
         )
 
     def _assess_funding_alignment(self, funding_rate: float, direction: str) -> str:
@@ -208,15 +411,90 @@ class MarketContextBuffer:
             return "WEAK"
         return "NEUTRAL"
 
-    def _assess_combined(self, funding_alignment: str, oi_alignment: str) -> str:
+    def _assess_cvd_alignment(
+        self, spot_dir: str, futures_dir: str, signal_direction: str
+    ) -> str:
         """
-        Combine funding and OI assessments into overall verdict.
+        Assess CVD alignment with signal direction.
 
-        - CAUTION funding -> UNFAVORABLE
-        - FAVORABLE funding + CONFIRMATION/NEUTRAL OI -> FAVORABLE
-        - SQUEEZE_RISK overrides to NEUTRAL at best
-        - Everything else -> NEUTRAL
+        - LONG + SpotCVD FALLING → VETO
+        - SHORT + SpotCVD RISING → VETO
+        - Both CVDs aligned with direction → CONFIRMS
+        - SpotCVD confirms, futures diverges → PARTIAL
+        - No data (UNKNOWN) → NEUTRAL
         """
+        if spot_dir == "UNKNOWN":
+            return "NEUTRAL"
+
+        # Determine if spot CVD opposes signal
+        spot_opposes = (
+            (signal_direction == "LONG" and spot_dir == "FALLING") or
+            (signal_direction == "SHORT" and spot_dir == "RISING")
+        )
+        if spot_opposes:
+            return "VETO"
+
+        # Spot confirms: check if direction matches signal
+        spot_confirms = (
+            (signal_direction == "LONG" and spot_dir == "RISING") or
+            (signal_direction == "SHORT" and spot_dir == "FALLING")
+        )
+
+        if spot_confirms:
+            # Check futures alignment
+            futures_confirms = (
+                (signal_direction == "LONG" and futures_dir == "RISING") or
+                (signal_direction == "SHORT" and futures_dir == "FALLING")
+            )
+            if futures_confirms or futures_dir == "UNKNOWN":
+                return "CONFIRMS"
+            return "PARTIAL"
+
+        # spot_dir == "FLAT"
+        return "NEUTRAL"
+
+    def _assess_whale_alignment(
+        self, conflicting: bool, largest_value: float
+    ) -> str:
+        """
+        Assess whale position alignment.
+
+        - No conflict → NEUTRAL
+        - Whale ≥$5M conflicting → VETO
+        - Whale ≥$1M conflicting → CAUTION
+        """
+        if not conflicting:
+            return "NEUTRAL"
+        if largest_value >= 5_000_000:
+            return "VETO"
+        if largest_value >= 1_000_000:
+            return "CAUTION"
+        return "NEUTRAL"
+
+    def _assess_combined(
+        self, funding_alignment: str, oi_alignment: str,
+        cvd_alignment: str = "NEUTRAL", whale_alignment: str = "NEUTRAL",
+    ) -> str:
+        """
+        Combine funding, OI, CVD, and whale assessments into overall verdict.
+
+        Priority:
+        1. CVD VETO → UNFAVORABLE
+        2. Whale VETO → UNFAVORABLE
+        3. CAUTION funding → UNFAVORABLE
+        4. CVD CONFIRMS can promote to FAVORABLE
+        5. FAVORABLE funding + CONFIRMATION/NEUTRAL OI → FAVORABLE
+        6. SQUEEZE_RISK overrides to NEUTRAL at best
+        7. Everything else → NEUTRAL
+        """
+        # CVD VETO is highest priority
+        if cvd_alignment == "VETO":
+            return "UNFAVORABLE"
+
+        # Whale VETO
+        if whale_alignment == "VETO":
+            return "UNFAVORABLE"
+
         if funding_alignment == "CAUTION":
             return "UNFAVORABLE"
 
@@ -228,6 +506,10 @@ class MarketContextBuffer:
                 return "FAVORABLE"
             return "NEUTRAL"  # WEAK OI downgrades favorable funding
 
+        # CVD CONFIRMS can promote neutral context to FAVORABLE
+        if cvd_alignment == "CONFIRMS" and oi_alignment != "WEAK":
+            return "FAVORABLE"
+
         # funding_alignment == "NEUTRAL"
         return "NEUTRAL"
 
@@ -238,9 +520,25 @@ class MarketContextBuffer:
             funding_symbols = len(self._funding_buffers)
             total_oi = sum(len(b) for b in self._oi_buffers.values())
             total_funding = sum(len(b) for b in self._funding_buffers.values())
+            cvd_symbols = len(self._spot_cvd_buffers)
+            total_spot_cvd = sum(len(b) for b in self._spot_cvd_buffers.values())
+            total_futures_cvd = sum(len(b) for b in self._futures_cvd_buffers.values())
+            whale_symbols = len(self._whale_positions)
+            total_whales = sum(len(v) for v in self._whale_positions.values())
+            total_orderbook = sum(len(b) for b in self._orderbook_buffers.values())
+            total_price = sum(len(b) for b in self._price_buffers.values())
+            fpe_symbols = len(self._funding_per_exchange)
         return {
             "oi_symbols_tracked": oi_symbols,
             "funding_symbols_tracked": funding_symbols,
             "total_oi_snapshots": total_oi,
             "total_funding_snapshots": total_funding,
+            "cvd_symbols_tracked": cvd_symbols,
+            "total_spot_cvd_snapshots": total_spot_cvd,
+            "total_futures_cvd_snapshots": total_futures_cvd,
+            "whale_symbols_tracked": whale_symbols,
+            "total_whale_positions": total_whales,
+            "total_orderbook_snapshots": total_orderbook,
+            "total_price_snapshots": total_price,
+            "funding_per_exchange_symbols": fpe_symbols,
         }

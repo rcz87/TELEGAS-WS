@@ -1,352 +1,399 @@
-# Message Formatter - Format Telegram Messages
-# Production-ready message formatting for Telegram
+# Message Formatter - Data-First Alert Format
+# Shows raw market data prominently, system bias as reference
 
 """
-Message Formatter Module
+Message Formatter Module — Data-First Format
 
-Responsibilities:
-- Format TradingSignal into readable Telegram messages
-- Priority-based formatting with emojis
-- Markdown formatting for Telegram
-- Visual indicators (progress bars, charts)
-- Clean, concise, actionable format
+Every alert shows raw market data first:
+- SpotCVD, FutCVD, OI, OBDelta
+- Funding Rate per exchange
+- Whale positions (Hyperliquid)
+- Price action + volume + liquidations
 
-Telegram Markdown:
-- *bold* for emphasis
-- `code` for values
-- Multiple line breaks for structure
+System bias (LONG/SHORT + confidence) at bottom as reference only.
+User decides entry based on data, not system conclusion.
 """
 
 from typing import Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from ..utils.logger import setup_logger
+from ..utils.symbol_normalizer import display_symbol
+
 
 class MessageFormatter:
     """
-    Production-ready message formatter for Telegram
-    
-    Formats trading signals into clean, readable,
-    actionable Telegram messages with proper markdown.
-    
-    Features:
-    - Priority-based formatting
-    - Visual indicators
-    - Clear structure
-    - Emoji indicators
+    Data-first message formatter for Telegram.
+
+    Shows raw market data prominently with system bias
+    as a small reference at the bottom.
     """
-    
+
+    # WIB = UTC+7
+    _WIB = timezone(timedelta(hours=7))
+
     def __init__(self):
         """Initialize message formatter"""
         self.logger = setup_logger("MessageFormatter", "INFO")
         self._messages_formatted = 0
-        
+
     def format_signal(self, signal: Any) -> str:
         """
-        Format trading signal based on type
-        
+        Format any trading signal using unified data-first format.
+
         Args:
             signal: TradingSignal object
-            
+
         Returns:
             Formatted Telegram message string
         """
         try:
-            # Get priority emoji
-            priority_emoji = self.get_priority_emoji(signal.priority)
-            
-            # Route to specific formatter
-            if signal.signal_type == "STOP_HUNT":
-                message = self.format_stop_hunt(signal)
-            elif signal.signal_type in ["ACCUMULATION", "DISTRIBUTION"]:
-                message = self.format_order_flow(signal)
-            elif signal.signal_type == "EVENT":
-                message = self.format_event(signal)
-            else:
-                message = self.format_generic(signal)
-            
+            message = self.format_data_first(signal)
             self._messages_formatted += 1
             return message
-            
         except Exception as e:
             self.logger.error(f"Formatting failed: {e}")
             return self.format_error(signal)
-    
-    def format_stop_hunt(self, signal: Any) -> str:
-        """
-        Format stop hunt signal
-        
-        Example output:
-        🔴 STOP HUNT DETECTED - BTCUSDT
-        
-        📊 *Liquidations*: $3.5M cleared
-        • Direction: SHORT_HUNT (longs stopped)
-        • Count: 175 liquidations
-        • Zone: $95,800 - $96,200
-        
-        🐋 *Whale Absorption*: $800K
-        ✅ Strong buying after cascade
-        
-        💡 *TRADING SETUP*
-        Entry: $96,000 - $96,200
-        Stop Loss: $95,650 (below hunt zone)
-        Target 1: $97,000 (+1.0%)
-        Target 2: $97,800 (+1.8%)
-        
-        🎯 Confidence: 85%
-        ⏰ 12:05:23 UTC
-        """
-        try:
-            metadata = signal.metadata.get('stop_hunt', {})
-            
-            # Priority emoji
-            priority_emoji = self.get_priority_emoji(signal.priority)
-            
-            # Direction
-            direction = "SHORT_HUNT (longs stopped)" if "SHORT" in str(metadata.get('direction', '')) else "LONG_HUNT (shorts stopped)"
-            
-            # Price zone - calculate levels from actual liquidation data
-            price_zone = metadata.get('price_zone', (0, 0))
-            zone_spread = abs(price_zone[1] - price_zone[0]) if price_zone[1] > 0 else 0
-            is_short_hunt = "SHORT" in str(metadata.get('direction', ''))
 
-            # Use small fraction of price as minimum risk (handles all price scales)
-            min_risk = max(price_zone[1] * 0.001, 1e-10)
+    def format_data_first(self, signal: Any) -> str:
+        """
+        Unified data-first formatter for all signal types.
 
-            if is_short_hunt:
-                # Longs got stopped, price akan naik → LONG entry
-                entry_low = price_zone[1]
-                entry_high = price_zone[1] + (zone_spread * 0.1)
-                sl = price_zone[0] - (zone_spread * 0.3)
-                risk = max(entry_low - sl, min_risk)
-                target1 = entry_low + (risk * 2)
-                target2 = entry_low + (risk * 3)
+        Sections:
+        1. Header: symbol | price | time
+        2. Trigger: signal type + key detail
+        3. Order Flow: SpotCVD, FutCVD, OI, OBDelta
+        4. Funding Rate: per-exchange rates
+        5. Whale: Hyperliquid positions if significant
+        6. Price Action: price, volume, liq 24h
+        7. Bias: system direction + confidence
+        8. DYOR disclaimer
+        """
+        ctx = signal.metadata.get('market_context', {})
+
+        # Build sections
+        header = self._format_header(signal, ctx)
+        trigger = self._format_trigger_line(signal)
+        order_flow = self._format_order_flow_section(ctx)
+        funding = self._format_funding_section(ctx)
+        whale = self._format_whale_section(ctx)
+        leading = self._format_leading_section(signal)
+        price_action = self._format_price_action_section(ctx, signal)
+        bias = self._format_bias_line(signal)
+
+        # Assemble — skip empty sections instead of showing N/A
+        hidden = sum(1 for s in [order_flow, funding] if not s)
+        sections = [header, trigger]
+        if order_flow:
+            sections.append(order_flow)
+        if funding:
+            sections.append(funding)
+        if whale:
+            sections.append(whale)
+        if leading:
+            sections.append(leading)
+        if price_action:
+            sections.append(price_action)
+        if hidden > 0:
+            sections.append("\U0001f4e1 _Market context limited_")
+        sections.append(bias)
+
+        return "\n\n".join(sections)
+
+    def _format_header(self, signal: Any, ctx: dict) -> str:
+        """Header: symbol | price | time WIB"""
+        symbol_clean = display_symbol(signal.symbol)
+        price = ctx.get('current_price', 0)
+        price_str = self.format_price(price) if price > 0 else "N/A"
+        time_str = datetime.now(self._WIB).strftime('%H:%M:%S')
+        return f"\u26a1 *{symbol_clean}* | {price_str} | {time_str} WIB"
+
+    def _format_trigger_line(self, signal: Any) -> str:
+        """Trigger line with signal type + full numerical detail"""
+        sig_type = signal.signal_type
+        metadata = signal.metadata
+
+        if sig_type == "STOP_HUNT":
+            sh = metadata.get('stop_hunt', {})
+            vol = sh.get('total_volume', 0)
+            direction = sh.get('direction', 'UNKNOWN')
+            absorption = sh.get('absorption_volume', 0)
+            dir_pct = sh.get('directional_percentage', 0) * 100
+            liq_count = sh.get('liquidation_count', 0)
+            lines = [f"\U0001f514 *Trigger: STOP\_HUNT* | {direction}"]
+            lines.append(f"Liquidasi: {self._fmt_large_usd(vol)} ({liq_count} events, {dir_pct:.0f}% one-sided)")
+            lines.append(f"Absorpsi : {self._fmt_large_usd(absorption)}" + (" \u2705" if absorption > 0 else " \u274c"))
+            return "\n".join(lines)
+
+        elif sig_type in ("ACCUMULATION", "DISTRIBUTION"):
+            of = metadata.get('order_flow', {})
+            net = of.get('net_delta', 0)
+            buy_ratio = of.get('buy_ratio', 0) * 100
+            large_buys = of.get('large_buys', 0)
+            large_sells = of.get('large_sells', 0)
+            total_vol = of.get('total_volume', 0)
+            lines = [f"\U0001f514 *Trigger: {sig_type}*"]
+            lines.append(f"Volume   : {self._fmt_large_usd(total_vol)} | Net delta: {self._fmt_value(net)}")
+            lines.append(f"Buy ratio: {buy_ratio:.0f}% | Whale orders: {large_buys}B/{large_sells}S")
+            return "\n".join(lines)
+
+        elif sig_type == "EVENT":
+            events = metadata.get('events', [])
+            count = len(events)
+            descs = [e.get('type', 'unknown').replace('_', ' ').title() for e in events[:3]]
+            lines = [f"\U0001f514 *Trigger: EVENT* ({count} event{'s' if count > 1 else ''})"]
+            for d in descs:
+                lines.append(f"\u2022 {d}")
+            return "\n".join(lines)
+
+        else:
+            return f"\U0001f514 *Trigger: {sig_type}*"
+
+    def _format_order_flow_section(self, ctx: dict) -> str:
+        """Order Flow section: SpotCVD, FutCVD, OI, OBDelta with full numbers."""
+        has_spot = ctx.get('spot_cvd_direction', 'UNKNOWN') != 'UNKNOWN'
+        has_fut = ctx.get('futures_cvd_direction', 'UNKNOWN') != 'UNKNOWN'
+        has_oi = ctx.get('oi_usd', 0) > 0
+        has_ob = ctx.get('orderbook_dominant', 'UNKNOWN') != 'UNKNOWN'
+
+        if not any([has_spot, has_fut, has_oi, has_ob]):
+            return ""
+
+        lines = ["\U0001f4ca *ORDER FLOW*"]
+
+        if has_spot:
+            spot_dir = ctx['spot_cvd_direction']
+            spot_slope = ctx.get('spot_cvd_slope', 0)
+            arrow = self._dir_arrow(spot_dir)
+            lines.append(f"SpotCVD  : {self._fmt_value(ctx.get('spot_cvd_latest', 0))} {arrow} slope:{self._fmt_value(spot_slope)}/5m")
+
+        if has_fut:
+            fut_dir = ctx['futures_cvd_direction']
+            fut_slope = ctx.get('futures_cvd_slope', 0)
+            arrow = self._dir_arrow(fut_dir)
+            lines.append(f"FutCVD   : {self._fmt_value(ctx.get('futures_cvd_latest', 0))} {arrow} slope:{self._fmt_value(fut_slope)}/5m")
+
+        # CVD alignment label
+        cvd_align = ctx.get('cvd_alignment', 'NEUTRAL')
+        if has_spot or has_fut:
+            lines.append(f"CVD sync : {cvd_align}")
+
+        if has_oi:
+            oi_usd = ctx['oi_usd']
+            oi_change = ctx.get('oi_change_1h_pct', 0)
+            oi_align = ctx.get('oi_alignment', 'NEUTRAL')
+            oi_arrow = "\u25b2" if oi_change > 0 else "\u25bc" if oi_change < 0 else "\u25b6"
+            lines.append(f"OI       : {self._fmt_large_usd(oi_usd)} {oi_arrow} {oi_change:+.1f}% 1h [{oi_align}]")
+
+        if has_ob:
+            ob_dominant = ctx['orderbook_dominant']
+            bid_vol = ctx.get('orderbook_bid_vol', 0)
+            ask_vol = ctx.get('orderbook_ask_vol', 0)
+            total_ob = bid_vol + ask_vol
+            bid_pct = (bid_vol / total_ob * 100) if total_ob > 0 else 50
+            lines.append(f"OBDelta  : Bid {self._fmt_large_usd(bid_vol)} ({bid_pct:.0f}%) / Ask {self._fmt_large_usd(ask_vol)} ({100-bid_pct:.0f}%)")
+
+        return "\n".join(lines)
+
+    def _format_funding_section(self, ctx: dict) -> str:
+        """Funding Rate section: per-exchange rates with alignment. Returns '' if no data."""
+        per_exchange = ctx.get('funding_per_exchange', {})
+        fr = ctx.get('funding_rate', 0)
+        funding_align = ctx.get('funding_alignment', 'NEUTRAL')
+
+        if not per_exchange and fr == 0:
+            return ""
+
+        lines = ["\U0001f4b8 *FUNDING RATE*"]
+        if per_exchange:
+            sorted_rates = sorted(per_exchange.items(), key=lambda x: abs(x[1]), reverse=True)
+            for exchange, rate in sorted_rates[:5]:
+                # CoinGlass per-exchange rates are already in % form (0.01 = 1%)
+                lines.append(f"{exchange:9s}: {rate:+.4f}%")
+        else:
+            lines.append(f"Avg      : {fr:+.4f}%")
+        lines.append(f"Alignment: {funding_align}")
+
+        return "\n".join(lines)
+
+    def _format_whale_section(self, ctx: dict) -> str:
+        """Whale section: Hyperliquid positions if significant (>= $1M)"""
+        whale_conflicting = ctx.get('whale_conflicting', False)
+        whale_val = ctx.get('whale_largest_value_usd', 0)
+        whale_dir = ctx.get('whale_largest_direction', '')
+        whale_entry = ctx.get('whale_entry_price', 0)
+        whale_liq = ctx.get('whale_liq_price', 0)
+        whale_align = ctx.get('whale_alignment', 'NEUTRAL')
+
+        # Show whale section if any significant position exists
+        if whale_val < 1_000_000:
+            return ""
+
+        lines = ["\U0001f40b *WHALE (Hyperliquid)*"]
+
+        dir_label = whale_dir.upper() if whale_dir else "?"
+        val_str = self._fmt_large_usd(whale_val)
+
+        detail = f"{dir_label} {val_str}"
+        if whale_entry > 0:
+            detail += f" @ {self.format_price(whale_entry)}"
+        if whale_liq > 0:
+            detail += f" | Liq: {self.format_price(whale_liq)}"
+        detail += f" [{whale_align}]"
+
+        lines.append(detail)
+
+        return "\n".join(lines)
+
+    def _format_price_action_section(self, ctx: dict, signal: Any) -> str:
+        """Price Action section: price, volume, liq 24h. Returns '' if no data."""
+        price = ctx.get('current_price', 0)
+        volume = ctx.get('volume_24h', 0)
+        liq_24h = ctx.get('liquidation_24h_volume', 0)
+
+        if price == 0 and volume == 0 and liq_24h == 0:
+            return ""
+
+        lines = ["\U0001f4c8 *PRICE ACTION*"]
+
+        # Price + 24h change (omit % if from WebSocket since we don't have 24h data)
+        if price > 0:
+            change_24h = ctx.get('price_change_24h_pct', 0)
+            if change_24h != 0:
+                lines.append(f"Harga    : {self.format_price(price)} ({change_24h:+.1f}% 24h)")
             else:
-                # Shorts got stopped (LONG_HUNT), price akan turun → SHORT entry near top of zone
-                entry_high = price_zone[1]
-                entry_low = price_zone[1] - (zone_spread * 0.1)
-                sl = price_zone[1] + (zone_spread * 0.3)
-                risk = max(sl - entry_high, min_risk)
-                target1 = entry_high - (risk * 2)
-                target2 = entry_high - (risk * 3)
+                lines.append(f"Harga    : {self.format_price(price)}")
 
-            entry_mid = (entry_low + entry_high) / 2 if entry_low > 0 else min_risk
-            t1_pct = abs(target1 - entry_mid) / entry_mid * 100
-            t2_pct = abs(target2 - entry_mid) / entry_mid * 100
-            risk_pct = risk / entry_mid * 100
+        # Volume (only show if available from REST)
+        if volume > 0:
+            lines.append(f"Volume   : {self._fmt_large_usd(volume)}")
 
-            # Absorption context
-            absorption_vol = metadata.get('absorption_volume', 0)
-            total_vol = metadata.get('total_volume', 1)
-            absorption_pct = (absorption_vol / total_vol * 100) if total_vol > 0 else 0
+        # Liquidation 24h
+        uptime = ctx.get('uptime_hours', 0)
+        if liq_24h > 0:
+            lines.append(f"Liq 24h  : {self._fmt_large_usd(liq_24h)}")
+        elif uptime < 1:
+            lines.append("Liq 24h  : warmup")
+        else:
+            lines.append("Liq 24h  : $0")
 
-            # Track record from metadata (populated by signal_tracker)
-            track_line = ""
-            track = metadata.get('track_record', {})
-            if track.get('total', 0) > 0:
-                track_line = f"\n📈 *Track Record*: {track['wins']}W/{track['losses']}L ({track['win_rate']:.0f}%)"
+        return "\n".join(lines)
 
-            fp = self.format_price
-            message = f"""{priority_emoji} *STOP HUNT DETECTED* - {signal.symbol}
+    def _format_leading_section(self, signal: Any) -> str:
+        """Leading indicators section with details. Returns '' if no data."""
+        ls = signal.metadata.get('leading_score', {})
+        indicators = ls.get('indicators', [])
+        notes = ls.get('notes', [])
 
-📊 *Liquidations*: ${metadata.get('total_volume', 0)/1_000_000:.1f}M cleared
-• Direction: {direction}
-• Count: {metadata.get('liquidation_count', 0)} liquidations
-• Zone: {fp(price_zone[0])} - {fp(price_zone[1])}
+        if not indicators and not notes:
+            return ""
 
-🐋 *Whale Absorption*: ${absorption_vol/1_000:.0f}K ({absorption_pct:.0f}% of cascade)
+        lines = ["\U0001f525 *LEADING SIGNALS*"]
+        for ind in indicators:
+            if ind.get('detail'):
+                lines.append(f"\u2726 {ind['detail']}")
+        for note in notes:
+            lines.append(f"\u2726 {note}")
 
-💡 *TRADING SETUP* {'📈 LONG' if is_short_hunt else '📉 SHORT'}
-Entry: {fp(entry_low)} - {fp(entry_high)}
-Stop Loss: {fp(sl)} ({risk_pct:.1f}% risk)
-Target 1: {fp(target1)} ({'+' if is_short_hunt else '-'}{t1_pct:.1f}%) R:R 1:2
-Target 2: {fp(target2)} ({'+' if is_short_hunt else '-'}{t2_pct:.1f}%) R:R 1:3{track_line}{self.format_market_context_section(signal.metadata)}
+        return "\n".join(lines)
 
-🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
-            
-            return message
-            
-        except Exception as e:
-            self.logger.error(f"Stop hunt formatting failed: {e}")
-            return self.format_generic(signal)
-    
-    def format_order_flow(self, signal: Any) -> str:
-        """
-        Format order flow signal (accumulation/distribution)
-        
-        Example output:
-        🟢 ETHUSDT - WHALE ACCUMULATION
-        
-        📈 *5min Analysis*
-        
-        Buy Volume: $2.2M (72%)
-        ████████████████░░░░░░░░
-        
-        Sell Volume: $850K (28%)
-        ████████░░░░░░░░░░░░░░░
-        
-        🐋 *Whale Activity*
-        • Large Buys: 15 orders >$10K
-        • Large Sells: 5 orders >$10K
-        
-        📊 Net Delta: +$1.35M (BULLISH)
-        
-        💡 Signal: Strong accumulation
-        
-        🎯 Confidence: 78%
-        ⏰ 12:05:23 UTC
-        """
-        try:
-            metadata = signal.metadata.get('order_flow', {})
-            
-            # Priority and type emoji
-            if signal.signal_type == "ACCUMULATION":
-                type_emoji = "🟢"
-                signal_desc = "WHALE ACCUMULATION"
-                delta_label = "BULLISH"
-            else:
-                type_emoji = "🔴"
-                signal_desc = "WHALE DISTRIBUTION"
-                delta_label = "BEARISH"
-            
-            buy_ratio = metadata.get('buy_ratio', 0.5)
-            buy_pct = buy_ratio * 100
-            sell_pct = (1 - buy_ratio) * 100
-            
-            # Get actual buy/sell volumes
-            buy_vol = metadata.get('buy_volume', 0)
-            sell_vol = metadata.get('sell_volume', 0)
-            net_delta = metadata.get('net_delta', 0)
+    def _format_bias_line(self, signal: Any) -> str:
+        """System bias with leading label + progress bar + context verdict + DYOR"""
+        direction = signal.direction.upper() if signal.direction else "NEUTRAL"
+        confidence = signal.confidence
+        ctx = signal.metadata.get('market_context', {})
 
-            # Progress bars
-            buy_bar = self.create_progress_bar(buy_pct, 20)
-            sell_bar = self.create_progress_bar(sell_pct, 20)
+        if direction in ("LONG", "BULLISH"):
+            dir_emoji = "\U0001f4c8"
+            dir_label = "LONG"
+        elif direction in ("SHORT", "BEARISH"):
+            dir_emoji = "\U0001f4c9"
+            dir_label = "SHORT"
+        else:
+            dir_emoji = "\u2796"
+            dir_label = "NEUTRAL"
 
-            message = f"""{type_emoji} *{signal.symbol}* - {signal_desc}
+        # Use leading score label if available
+        ls = signal.metadata.get('leading_score', {})
+        label_emoji = ls.get('label_emoji', '\U0001f3af')
+        label_text = ls.get('label_text', '')
 
-📈 *5min Analysis*
+        # Progress bar
+        bar = self.create_progress_bar(confidence, length=10)
 
-Buy Volume: ${buy_vol/1000:.0f}K ({buy_pct:.0f}%)
-{buy_bar}
+        if label_text:
+            header = f"{label_emoji} {dir_label} {dir_emoji} \u2014 {label_text}"
+        else:
+            header = f"\U0001f3af {dir_label} {dir_emoji}"
 
-Sell Volume: ${sell_vol/1000:.0f}K ({sell_pct:.0f}%)
-{sell_bar}
+        # Market context verdict
+        assessment = ctx.get('combined_assessment', '')
+        assessment_line = ""
+        if assessment:
+            assess_emoji = {
+                "FAVORABLE": "\u2705",
+                "NEUTRAL": "\u2796",
+                "UNFAVORABLE": "\u274c",
+            }.get(assessment, "")
+            assessment_line = f"\nContext  : {assess_emoji} {assessment}"
 
-🐋 *Whale Activity*
-• Large Buys: {metadata.get('large_buys', 0)} whale orders
-• Large Sells: {metadata.get('large_sells', 0)} whale orders
+        return f"{header}\n{bar} {confidence:.0f}%{assessment_line}\n\u26a0\ufe0f DYOR \u2014 verifikasi sebelum entry"
 
-📊 Net Delta: ${net_delta/1000:+.0f}K ({delta_label})
+    # --- Utility helpers ---
 
-💡 Signal: Strong {'accumulation' if signal.signal_type == 'ACCUMULATION' else 'distribution'}{self.format_market_context_section(signal.metadata)}
+    @staticmethod
+    def _fmt_value(v: float) -> str:
+        """Format value with K/M suffix and sign"""
+        if abs(v) >= 1_000_000:
+            return f"{v/1_000_000:+.1f}M"
+        elif abs(v) >= 1_000:
+            return f"{v/1_000:+.0f}K"
+        else:
+            return f"{v:+.0f}"
 
-🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
+    @staticmethod
+    def _fmt_large_usd(v: float) -> str:
+        """Format large USD value (no sign)"""
+        if v >= 1_000_000_000:
+            return f"${v/1_000_000_000:.1f}B"
+        elif v >= 1_000_000:
+            return f"${v/1_000_000:.1f}M"
+        elif v >= 1_000:
+            return f"${v/1_000:.0f}K"
+        else:
+            return f"${v:.0f}"
 
-            return message
+    @staticmethod
+    def _dir_arrow(direction: str) -> str:
+        """Direction to arrow symbol"""
+        return {
+            "RISING": "\u25b2",
+            "FALLING": "\u25bc",
+            "FLAT": "\u25b6",
+        }.get(direction, "?")
 
-        except Exception as e:
-            self.logger.error(f"Order flow formatting failed: {e}")
-            return self.format_generic(signal)
-    
-    def format_event(self, signal: Any) -> str:
-        """
-        Format event signal
-        
-        Example output:
-        ⚡ BTCUSDT - MARKET EVENT
-        
-        🔔 Liquidation Cascade
-        $8.0M in 30 seconds
-        
-        🔔 Whale Accumulation
-        12 large buy orders detected
-        
-        💡 Multiple events detected
-        
-        🎯 Confidence: 85%
-        ⏰ 12:05:23 UTC
-        """
-        try:
-            events = signal.metadata.get('events', [])
-            
-            event_lines = []
-            for event in events[:3]:  # Max 3 events
-                event_lines.append(f"🔔 {event.get('type', 'Unknown').replace('_', ' ').title()}")
-                event_lines.append(event.get('description', ''))
-                event_lines.append("")
-            
-            message = f"""⚡ *{signal.symbol}* - MARKET EVENTS
+    # --- Kept methods ---
 
-{chr(10).join(event_lines)}
-💡 {len(events)} event{'s' if len(events) > 1 else ''} detected
-
-🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
-            
-            return message
-            
-        except Exception as e:
-            self.logger.error(f"Event formatting failed: {e}")
-            return self.format_generic(signal)
-    
     def format_generic(self, signal: Any) -> str:
         """Generic fallback formatter"""
         priority_emoji = self.get_priority_emoji(signal.priority)
-        
+
         return f"""{priority_emoji} *{signal.symbol}* - {signal.signal_type}
 
 Direction: {signal.direction}
 Sources: {', '.join(signal.sources)}
 
-🎯 Confidence: {signal.confidence:.0f}%
-⏰ {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"""
-    
+\U0001f3af Confidence: {signal.confidence:.0f}%
+\u23f0 {datetime.now(self._WIB).strftime('%H:%M:%S')} WIB"""
+
     def format_error(self, signal: Any) -> str:
         """Format error message"""
-        return f"""⚠️ *Signal Formatting Error*
+        return f"""\u26a0\ufe0f *Signal Formatting Error*
 
 Symbol: {getattr(signal, 'symbol', 'Unknown')}
 Type: {getattr(signal, 'signal_type', 'Unknown')}
 
 Please check logs for details."""
-    
-    def format_market_context_section(self, metadata: dict) -> str:
-        """
-        Format market context (OI + funding) section for Telegram message.
-
-        Returns empty string if no market context data available.
-        """
-        ctx = metadata.get('market_context')
-        if not ctx:
-            return ""
-
-        funding_rate = ctx.get('funding_rate', 0)
-        funding_pct = funding_rate * 100
-        funding_align = ctx.get('funding_alignment', 'N/A')
-        oi_usd = ctx.get('oi_usd', 0)
-        oi_change = ctx.get('oi_change_1h_pct', 0)
-        oi_align = ctx.get('oi_alignment', 'N/A')
-        assessment = ctx.get('combined_assessment', 'NEUTRAL')
-
-        # Assessment emoji
-        assess_emoji = {"FAVORABLE": "✅", "UNFAVORABLE": "⚠️"}.get(assessment, "➖")
-        fund_emoji = {"FAVORABLE": "✅", "CAUTION": "⚠️"}.get(funding_align, "➖")
-        oi_emoji = {"CONFIRMATION": "✅", "WEAK": "⚠️", "SQUEEZE_RISK": "⚠️"}.get(oi_align, "➖")
-
-        # Format OI value (billions or millions)
-        if oi_usd >= 1_000_000_000:
-            oi_str = f"${oi_usd / 1_000_000_000:.1f}B"
-        elif oi_usd >= 1_000_000:
-            oi_str = f"${oi_usd / 1_000_000:.0f}M"
-        else:
-            oi_str = f"${oi_usd / 1_000:.0f}K"
-
-        return f"""
-📡 *Market Context* {assess_emoji}
-• Funding: {funding_pct:+.4f}% {fund_emoji} {funding_align}
-• OI: {oi_str} ({oi_change:+.1f}% 1h) {oi_emoji} {oi_align}"""
 
     @staticmethod
     def format_price(price: float) -> str:
@@ -370,37 +417,20 @@ Please check logs for details."""
             return f"${price:.8f}"
 
     def get_priority_emoji(self, priority: int) -> str:
-        """
-        Get emoji based on priority
-        
-        Args:
-            priority: Priority level (1-3)
-            
-        Returns:
-            Emoji string
-        """
+        """Get emoji based on priority (1=urgent, 2=watch, 3=info)"""
         if priority == 1:
-            return "🔴"  # Urgent
+            return "\U0001f534"  # red circle
         elif priority == 2:
-            return "🟡"  # Watch
+            return "\U0001f7e1"  # yellow circle
         else:
-            return "🔵"  # Info
-    
+            return "\U0001f535"  # blue circle
+
     def create_progress_bar(self, percentage: float, length: int = 20) -> str:
-        """
-        Create visual progress bar
-        
-        Args:
-            percentage: Percentage value (0-100)
-            length: Total length of bar
-            
-        Returns:
-            Progress bar string
-        """
+        """Create visual progress bar"""
         filled = int(length * percentage / 100)
         filled = max(0, min(filled, length))
-        return "█" * filled + "░" * (length - filled)
-    
+        return "\u2588" * filled + "\u2591" * (length - filled)
+
     def get_stats(self) -> dict:
         """Get formatter statistics"""
         return {

@@ -43,24 +43,38 @@ class SignalValidator:
     """
     
     def __init__(
-        self, 
-        max_signals_per_hour: int = 50, 
+        self,
+        max_signals_per_hour: int = 50,
         min_confidence: float = 65.0,
-        cooldown_minutes: int = 5
+        cooldown_minutes: int = 5,
+        monitoring_config: dict = None
     ):
         """
         Initialize signal validator
-        
+
         Args:
             max_signals_per_hour: Maximum signals allowed per hour
             min_confidence: Minimum confidence threshold
-            cooldown_minutes: Cooldown period between same signals
+            cooldown_minutes: Cooldown period between same signals (fallback)
+            monitoring_config: Tier config for per-tier cooldowns
         """
         self.max_signals_per_hour = max_signals_per_hour
         self.min_confidence = min_confidence
         self.cooldown_minutes = cooldown_minutes
-        
+
         self.logger = setup_logger("SignalValidator", "INFO")
+
+        # Tier-based cooldowns (minutes)
+        monitoring = monitoring_config or {}
+        self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
+        self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
+        self._tier3_symbols = set(monitoring.get('tier3_symbols', []))
+        self._tier_cooldowns = {
+            1: monitoring.get('tier1_cooldown_minutes', 60),
+            2: monitoring.get('tier2_cooldown_minutes', 30),
+            3: monitoring.get('tier3_cooldown_minutes', 20),
+            4: monitoring.get('tier4_cooldown_minutes', 15),
+        }
         
         # Track recent signals for rate limiting
         self.recent_signals: List[datetime] = []
@@ -251,23 +265,42 @@ class SignalValidator:
         
         return False
     
+    def _get_symbol_tier(self, symbol: str) -> int:
+        """Get tier number for a symbol (1-4)."""
+        if symbol in self._tier1_symbols:
+            return 1
+        elif symbol in self._tier2_symbols:
+            return 2
+        elif symbol in self._tier3_symbols:
+            return 3
+        return 4
+
+    def _get_cooldown_for_symbol(self, symbol: str) -> int:
+        """Get cooldown minutes based on symbol tier."""
+        tier = self._get_symbol_tier(symbol)
+        return self._tier_cooldowns.get(tier, self.cooldown_minutes)
+
     def _approve_signal(self, signal, signal_key: str, signal_hash: str):
         """
         Approve signal and update tracking
-        
+
         Args:
             signal: Approved signal
             signal_key: Signal key
             signal_hash: Signal hash
         """
         now = datetime.now(timezone.utc)
-        
+
         # Add to rate limit tracking
         self.recent_signals.append(now)
-        
-        # Add cooldown
-        self.signal_cooldowns[signal_key] = now + timedelta(minutes=self.cooldown_minutes)
-        
+
+        # Add tier-based cooldown
+        cooldown = self._get_cooldown_for_symbol(signal.symbol)
+        self.signal_cooldowns[signal_key] = now + timedelta(minutes=cooldown)
+        self.logger.info(
+            f"Cooldown set: {signal.symbol} tier {self._get_symbol_tier(signal.symbol)} → {cooldown} min"
+        )
+
         # Add hash
         self.recent_hashes[signal_hash] = now
     
