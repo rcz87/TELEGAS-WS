@@ -237,6 +237,12 @@ class MarketContextBuffer:
             buf = self._price_buffers.get(symbol, deque())
             return buf[-1] if buf else None
 
+    def get_price_history(self, symbol: str, limit: int = 5) -> list:
+        """Get last N price snapshots for symbol."""
+        with self._lock:
+            buf = list(self._price_buffers.get(symbol, deque()))
+            return buf[-limit:] if buf else []
+
     def get_spot_cvd_history(self, symbol: str, n: int = 6) -> list:
         """Get last N spot CVD snapshots for symbol."""
         with self._lock:

@@ -67,6 +67,7 @@ from src.ml.model_trainer import ModelTrainer
 from src.ml.ml_inference import MLInferenceEngine
 from src.ml.guardrails import MLGuardrails
 from src.signals.signal_lifecycle import SignalLifecycleManager
+from src.signals.rest_signal_detector import RestSignalDetector
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -218,6 +219,12 @@ class TeleglasPro:
         # Signal lifecycle (expiry, primary selection, anti-flip)
         lifecycle_expiry = config.get('signal_lifecycle', {}).get('expiry', {})
         self.lifecycle = SignalLifecycleManager(expiry_config=lifecycle_expiry or None)
+
+        # REST-based signal detector (CVD flip, OI spike, whale activity)
+        self.rest_signal_detector = RestSignalDetector(
+            market_context_buffer=self.market_context_buffer,
+            monitoring_config=monitoring_config,
+        )
 
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
@@ -760,6 +767,94 @@ class TeleglasPro:
         except Exception as e:
             self.logger.error(f"State save error: {e}")
 
+    async def _scan_rest_signals(self):
+        """Scan all tracked symbols for REST-based signals (CVD flip, OI spike, whale)."""
+        try:
+            # Get symbols that have REST data
+            buffer_stats = self.market_context_buffer.get_stats()
+            oi_count = buffer_stats.get("oi_symbols_tracked", 0)
+            if oi_count == 0:
+                return  # No REST data yet
+
+            # Scan symbols from REST poller
+            for base_symbol in self.rest_poller.symbols[:50]:  # limit to 50 per cycle
+                symbol = f"{base_symbol}USDT" if not base_symbol.endswith("USDT") else base_symbol
+
+                signal = self.rest_signal_detector.evaluate(base_symbol)
+                if not signal:
+                    continue
+
+                # Push to dashboard
+                signal_dict = {
+                    "symbol": symbol,
+                    "type": signal.signal_type,
+                    "direction": signal.direction,
+                    "confidence": int(signal.confidence),
+                    "description": signal.description,
+                    "market_context": "",
+                    "leading_label": " + ".join(signal.sources),
+                }
+                dashboard_api.add_signal(signal_dict)
+
+                # Register with lifecycle manager
+                self.lifecycle.ingest(signal_dict)
+
+                self.stats["signals_generated"] += 1
+
+                self.logger.info(
+                    f"REST SIGNAL → {symbol} {signal.signal_type} {signal.direction} "
+                    f"conf={signal.confidence:.0f}% sources={signal.sources}"
+                )
+
+                # Send to Telegram if coin is active and confidence high enough
+                if signal.confidence >= 70 and self._is_coin_active(symbol):
+                    try:
+                        from src.utils.symbol_normalizer import display_symbol
+                        alert_msg = (
+                            f"{'🟢' if signal.direction == 'LONG' else '🔴'} "
+                            f"{display_symbol(symbol)} — {signal.signal_type} {signal.direction}\n"
+                            f"Confidence: {signal.confidence:.0f}%\n"
+                            f"Sources: {', '.join(signal.sources)}\n"
+                            f"{signal.description}"
+                        )
+                        await self.alert_queue.add(alert_msg, priority=2)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            self.logger.error(f"REST signal scan error: {e}")
+
+    def _update_order_flow_from_rest(self):
+        """Update dashboard order flow using REST taker data (fixes buy_ratio=0)."""
+        try:
+            for base_symbol in self.rest_poller.symbols[:50]:
+                symbol = f"{base_symbol}USDT" if not base_symbol.endswith("USDT") else base_symbol
+
+                # Get taker data from CVD snapshot (has taker_buy_vol / taker_sell_vol)
+                spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
+                if not spot_cvd:
+                    continue
+
+                buy_vol = spot_cvd.taker_buy_vol
+                sell_vol = spot_cvd.taker_sell_vol
+                total = buy_vol + sell_vol
+                if total <= 0:
+                    continue
+
+                buy_ratio = buy_vol / total
+                flow_data = {
+                    "buy_ratio": round(buy_ratio * 100),
+                    "sell_ratio": round((1 - buy_ratio) * 100),
+                    "buy_volume": buy_vol,
+                    "sell_volume": sell_vol,
+                    "large_buys": 0,
+                    "large_sells": 0,
+                }
+                dashboard_api.update_order_flow(symbol, flow_data)
+
+        except Exception as e:
+            self.logger.debug(f"Order flow REST update error: {e}")
+
     async def analyze_and_alert(self, symbol: str):
         """
         Run analysis and send alerts for symbol.
@@ -1187,6 +1282,12 @@ class TeleglasPro:
             # Tick signal lifecycle (expire, weaken, cleanup)
             self.lifecycle.tick()
 
+            # REST signal scan — detect CVD flips, OI spikes, whale activity
+            await self._scan_rest_signals()
+
+            # Update order flow from REST taker data (fix buy_ratio=0)
+            self._update_order_flow_from_rest()
+
             # Collect analyzer stats for dashboard visibility
             self.stats['analyzers'] = {
                 'stop_hunt': self.stop_hunt_detector.get_stats(),
@@ -1202,6 +1303,7 @@ class TeleglasPro:
                 'calibration': self.calibration.get_stats(),
                 'feature_logger': self.feature_logger.get_stats(),
                 'lifecycle': self.lifecycle.get_stats(),
+                'rest_signal_detector': self.rest_signal_detector.get_stats(),
                 'ml_inference': self.ml_engine.get_stats(),
                 'ml_guardrails': self.ml_guardrails.get_stats(),
             }
