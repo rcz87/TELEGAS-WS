@@ -341,12 +341,12 @@ async def fetch_taker(symbol: str) -> dict:
 
 
 async def fetch_long_short(symbol: str) -> dict:
-    """Fetch global long/short account ratio from Binance."""
+    """Fetch global long/short account ratio from Binance (5m interval for freshness)."""
     try:
         http = await get_http()
         pair = f"{symbol}USDT"
         resp = await http.get(f"{CG_BASE}/api/futures/global-long-short-account-ratio/history", params={
-            "symbol": pair, "exchange": "Binance", "interval": "1h", "limit": 1,
+            "symbol": pair, "exchange": "Binance", "interval": "5m", "limit": 1,
         })
         data = resp.json()
         if str(data.get("code")) != "0":

@@ -806,8 +806,24 @@ class TeleglasPro:
                     f"conf={signal.confidence:.0f}% sources={signal.sources}"
                 )
 
-                # Send to Telegram if coin is active and confidence high enough
-                if signal.confidence >= 70 and self._is_coin_active(symbol):
+                # Telegram alert gate — quality checks before sending
+                send_telegram = signal.confidence >= 70 and self._is_coin_active(symbol)
+
+                if send_telegram:
+                    # CVD VETO: don't send LONG if SpotCVD cumulative negative
+                    spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
+                    if spot_cvd and signal.direction == "LONG" and spot_cvd.cvd_latest < 0:
+                        send_telegram = False
+                        self.logger.info(
+                            f"CVD VETO {symbol}: LONG blocked — SpotCVD cumulative negative ({spot_cvd.cvd_latest:,.0f})"
+                        )
+                    elif spot_cvd and signal.direction == "SHORT" and spot_cvd.cvd_latest > 0:
+                        send_telegram = False
+                        self.logger.info(
+                            f"CVD VETO {symbol}: SHORT blocked — SpotCVD cumulative positive ({spot_cvd.cvd_latest:,.0f})"
+                        )
+
+                if send_telegram:
                     try:
                         from src.utils.symbol_normalizer import display_symbol
                         alert_msg = (

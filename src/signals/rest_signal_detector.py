@@ -77,7 +77,7 @@ class RestSignalDetector:
     # ── CVD Flip Detection ──────────────────────────────────────────
 
     def check_cvd_flip(self, symbol: str) -> Optional[RestSignal]:
-        """Check if SpotCVD just flipped direction."""
+        """Check if SpotCVD just flipped direction (requires 2-snapshot confirmation)."""
         spot_history = self.buffer.get_spot_cvd_history(symbol, n=3)
         fut_history = self.buffer.get_futures_cvd_history(symbol, n=3)
 
@@ -97,12 +97,27 @@ class RestSignalDetector:
         if curr_dir == prev_dir or curr_dir == "FLAT" or prev_dir == "FLAT":
             return None
 
+        # 2-snapshot confirmation: need previous snapshot also trending in new direction
+        # If we have 3 snapshots, check that middle was already transitioning
+        if len(spot_history) >= 3:
+            mid = spot_history[-2]
+            oldest = spot_history[-3]
+            # Confirmed: both recent snapshots show new direction trend
+            mid_trending = (mid.cvd_latest > oldest.cvd_latest) if curr_dir == "RISING" else (mid.cvd_latest < oldest.cvd_latest)
+            if not mid_trending:
+                return None  # Single-snapshot flip — not confirmed
+
         # Check minimum delta
         tier = self._get_tier(symbol)
         min_delta = CVD_MIN_DELTA.get(tier, 10_000)
         delta = abs(current.cvd_latest - (previous.cvd_latest if previous else 0))
 
         if delta < min_delta:
+            return None
+
+        # CVD VETO: for LONG signal, cumulative CVD must not be deeply negative
+        if curr_dir == "RISING" and current.cvd_latest < 0:
+            # CVD recovering but still negative — don't trigger LONG
             return None
 
         # Check futures alignment

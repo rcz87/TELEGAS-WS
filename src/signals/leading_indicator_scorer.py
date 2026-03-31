@@ -319,35 +319,61 @@ class LeadingIndicatorScorer:
         flip_weight: int, sustained_weight: int,
         cvd_min: float = 0,
     ) -> tuple:
-        """Score CVD: flip detection takes priority over sustained."""
+        """Score CVD: flip detection takes priority over sustained.
+
+        BUG FIX: flip requires 2+ candle confirmation, sustained requires
+        3+ candle delta in same direction AND cumulative alignment.
+        """
         if len(cvd_values) < 3:
             return 0, ""
 
+        prev2 = cvd_values[-3]
         prev = cvd_values[-2]
         curr = cvd_values[-1]
 
-        # Flip detection (must exceed tier minimum)
+        # Flip detection — requires 2-candle confirmation
+        # Both prev→curr AND prev2→prev must show the new direction
         if is_long and prev < 0 and curr > 0 and abs(curr) >= cvd_min:
-            return flip_weight, f"{label} FLIP POSITIF {self._fmt(curr)}"
+            # Confirmed if prev is already recovering (prev > prev2)
+            flip_confirmed = prev > prev2
+            if flip_confirmed:
+                return flip_weight, f"{label} FLIP POSITIF confirmed {self._fmt(curr)}"
+            else:
+                # Single candle flip — reduced weight, label as "recovering"
+                return flip_weight // 3, f"{label} RECOVERING (single candle) {self._fmt(curr)}"
         if not is_long and prev > 0 and curr < 0 and abs(curr) >= cvd_min:
-            return flip_weight, f"{label} FLIP NEGATIF {self._fmt(curr)}"
+            flip_confirmed = prev < prev2
+            if flip_confirmed:
+                return flip_weight, f"{label} FLIP NEGATIF confirmed {self._fmt(curr)}"
+            else:
+                return flip_weight // 3, f"{label} WEAKENING (single candle) {self._fmt(curr)}"
 
-        # Sustained: 3+ candles in direction
+        # Sustained: 3+ candle deltas in same direction AND cumulative alignment
         recent = cvd_values[-3:]
+        deltas = [recent[i] - recent[i - 1] for i in range(1, len(recent))]
+
         if is_long:
+            # All 3 candles positive AND all deltas positive (actually rising)
             all_positive = all(v > 0 for v in recent)
-            accelerating = all(recent[i] > recent[i - 1] for i in range(1, len(recent)))
-            if all_positive and accelerating:
+            all_deltas_positive = all(d > 0 for d in deltas)
+
+            if all_positive and all_deltas_positive:
                 return sustained_weight, f"{label} RISING sustained {self._fmt(curr)}"
-            if all_positive:
-                return sustained_weight // 2, f"{label} POSITIF {self._fmt(curr)}"
+            elif all_positive:
+                return sustained_weight // 2, f"{label} POSITIF steady {self._fmt(curr)}"
+            elif curr > 0 and all_deltas_positive:
+                # Cumulative positive + deltas rising = valid but weaker
+                return sustained_weight // 3, f"{label} RECOVERING trend {self._fmt(curr)}"
         else:
             all_negative = all(v < 0 for v in recent)
-            accelerating = all(recent[i] < recent[i - 1] for i in range(1, len(recent)))
-            if all_negative and accelerating:
+            all_deltas_negative = all(d < 0 for d in deltas)
+
+            if all_negative and all_deltas_negative:
                 return sustained_weight, f"{label} FALLING sustained {self._fmt(curr)}"
-            if all_negative:
-                return sustained_weight // 2, f"{label} NEGATIF {self._fmt(curr)}"
+            elif all_negative:
+                return sustained_weight // 2, f"{label} NEGATIF steady {self._fmt(curr)}"
+            elif curr < 0 and all_deltas_negative:
+                return sustained_weight // 3, f"{label} WEAKENING trend {self._fmt(curr)}"
 
         return 0, ""
 

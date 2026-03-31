@@ -747,7 +747,9 @@ class CoinGlassRestPoller:
         for entry in symbol_data.get("stablecoin_margin_list", []):
             ex_name = entry.get("exchange", "")
             rate = float(entry.get("funding_rate", 0))
-            if ex_name and rate != 0:
+            # Sanity check: FR should be between -1% and +1% per interval
+            # Values like 1.0 or -1.0 are clearly wrong (100%) — skip them
+            if ex_name and rate != 0 and abs(rate) < 0.01:
                 rates[ex_name] = rate
 
         if not rates:
