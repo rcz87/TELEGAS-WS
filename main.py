@@ -839,16 +839,83 @@ class TeleglasPro:
                 if send_telegram:
                     try:
                         from src.utils.symbol_normalizer import display_symbol
-                        alert_msg = (
-                            f"{'🟢' if signal.direction == 'LONG' else '🔴'} "
-                            f"{display_symbol(symbol)} — {signal.signal_type} {signal.direction}\n"
-                            f"Confidence: {signal.confidence:.0f}%\n"
-                            f"Sources: {', '.join(signal.sources)}\n"
-                            f"{signal.description}"
-                        )
+                        from datetime import timezone as _tz, timedelta as _td
+                        _wib = _tz(_td(hours=7))
+                        _now = datetime.now(_wib).strftime("%H:%M:%S WIB")
+
+                        # Build rich alert with context
+                        price_snap = self.market_context_buffer.get_latest_price(base_symbol)
+                        oi_snap = self.market_context_buffer.get_latest_oi(base_symbol)
+                        spot_cvd_snap = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
+                        fut_cvd_snap = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
+                        ob_snap = self.market_context_buffer.get_latest_orderbook(base_symbol)
+                        fpe = self.market_context_buffer.get_funding_per_exchange(base_symbol)
+
+                        price_str = f"${price_snap.price:,.4f}" if price_snap else "N/A"
+                        chg_str = f"{price_snap.change_24h_pct:+.1f}%" if price_snap else ""
+
+                        lines = [
+                            f"{display_symbol(symbol)} | {price_str} | {_now}",
+                            f"Trigger: REST SCAN | {signal.direction}",
+                            "",
+                        ]
+
+                        # Bullets from signal sources
+                        for src in signal.sources:
+                            meta = signal.metadata.get("sources", {}).get(src, signal.metadata)
+                            if src == "SpotCVD":
+                                d = meta.get("spot_cvd_direction", "")
+                                lines.append(f"✦ SpotCVD {d} {meta.get('spot_cvd_latest', 0):+,.0f}")
+                            elif src == "OpenInterest":
+                                lines.append(f"✦ OI {meta.get('interpretation', '')} ({meta.get('oi_change_pct', 0):+.1f}%)")
+                            elif src == "WhaleAlert":
+                                lines.append(f"✦ Whale net {signal.direction} ${meta.get('total_flow_usd', 0):,.0f} ({meta.get('dominance', 0):.0%})")
+                            else:
+                                lines.append(f"✦ {src}: {signal.description[:60]}")
+
+                        # Order flow section
+                        lines.append("")
+                        lines.append("ORDER FLOW")
+                        if spot_cvd_snap:
+                            lines.append(f"SpotCVD : {spot_cvd_snap.cvd_latest:+,.0f}  {spot_cvd_snap.cvd_direction}")
+                        if fut_cvd_snap:
+                            lines.append(f"FutCVD  : {fut_cvd_snap.cvd_latest:+,.0f}  {fut_cvd_snap.cvd_direction}")
+                        if oi_snap:
+                            lines.append(f"OI      : ${oi_snap.current_oi_usd:,.0f} {oi_snap.oi_change_pct:+.1f}% 1h")
+                        if ob_snap:
+                            total = ob_snap.total_bid_vol + ob_snap.total_ask_vol
+                            bid_pct = ob_snap.total_bid_vol / total * 100 if total else 50
+                            lines.append(f"OBDelta : Bid ${ob_snap.total_bid_vol:,.0f} ({bid_pct:.0f}%) / Ask ${ob_snap.total_ask_vol:,.0f}")
+
+                        # Funding rate (with sanity check)
+                        if fpe and fpe.rates:
+                            sane = {k: v for k, v in fpe.rates.items() if abs(v) < 0.01}
+                            if sane:
+                                lines.append("")
+                                lines.append("FUNDING RATE")
+                                for ex, rate in sorted(sane.items(), key=lambda x: abs(x[1]), reverse=True)[:5]:
+                                    lines.append(f"{ex:9s}: {rate:+.4f}%")
+
+                        # Price action
+                        if price_snap:
+                            lines.append("")
+                            lines.append("PRICE ACTION")
+                            lines.append(f"Harga  : {price_str} ({chg_str} 24h)")
+                            lines.append(f"Volume : ${price_snap.volume_24h:,.0f}")
+
+                        # Confidence bar
+                        conf = int(signal.confidence)
+                        filled = conf // 10
+                        bar = "█" * filled + "░" * (10 - filled)
+                        lines.append("")
+                        lines.append(f"{signal.direction}  — {'HIGH' if conf >= 75 else 'MEDIUM' if conf >= 60 else 'LOW'} CONFIDENCE")
+                        lines.append(f"{bar} {conf}%")
+                        lines.append("DYOR — verifikasi sebelum entry")
+
+                        alert_msg = "\n".join(lines)
                         await self.alert_queue.add(alert_msg, priority=2)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        self.logger.debug(f"REST alert format error: {e}")
 
         except Exception as e:
             self.logger.error(f"REST signal scan error: {e}")
