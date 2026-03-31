@@ -150,12 +150,18 @@ static_dir = Path(__file__).parent / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
-# CRITICAL FIX Bug #5: Thread-safe lock for global state
-# Prevents data corruption when multiple threads access system_state
-state_lock = threading.Lock()
+# ── State Manager ───────────────────────────────────────────────────────
+# Centralized, thread-safe state (replaces raw dict + lock).
+from src.dashboard.state_manager import StateManager
+
+_state_manager = StateManager()
+
+# Backward-compatible aliases so existing code (main.py, endpoints) keeps working.
+# `system_state` is now a *proxy* — reads/writes still go through the manager's lock.
+system_state = _state_manager._state   # direct ref (always access under state_lock!)
+state_lock = _state_manager._lock      # same lock object
 
 # Thread-safe queue for subscription requests from dashboard -> main.py
-# Items are dicts: {"action": "subscribe"|"unsubscribe", "symbol": "BTCUSDT"}
 _subscription_queue: queue.Queue = queue.Queue()
 
 # Event loop reference (set by lifespan) for cross-thread broadcasting
@@ -163,26 +169,6 @@ _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # Database reference (set by main.py after init)
 _db = None
-
-# Monotonic signal ID counter (thread-safe via state_lock)
-_signal_id_counter = 0
-
-# Global state (updated by main.py)
-system_state = {
-    "stats": {
-        "messages_received": 0,
-        "messages_processed": 0,
-        "liquidations_processed": 0,
-        "trades_processed": 0,
-        "signals_generated": 0,
-        "alerts_sent": 0,
-        "errors": 0,
-        "uptime_seconds": 0
-    },
-    "coins": [],
-    "signals": [],
-    "order_flow": {}
-}
 
 # WebSocket connections
 active_connections: List[WebSocket] = []
@@ -222,6 +208,18 @@ async def health_check():
         uptime = system_state["stats"].get("uptime_seconds", 0)
         coins_count = len(system_state["coins"])
     return {"status": "ok", "uptime_seconds": uptime, "coins_tracked": coins_count}
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint for scraping."""
+    try:
+        from src.utils.metrics import generate_metrics, coins_tracked, active_websocket_connections
+        with state_lock:
+            coins_tracked.set(len(system_state["coins"]))
+        active_websocket_connections.set(len(active_connections))
+        return Response(content=generate_metrics(), media_type="text/plain; version=0.0.4; charset=utf-8")
+    except Exception as e:
+        return Response(content=f"# Error generating metrics: {e}\n", media_type="text/plain")
 
 @app.get("/api/stats")
 async def get_stats(_rl=Depends(check_rate_limit)):
@@ -494,48 +492,27 @@ async def broadcast_update(event_type: str, data):
 # ============================================================================
 
 def update_stats(stats: dict):
-    """Update system statistics (thread-safe)."""
-    with state_lock:
-        system_state["stats"] = deepcopy(stats)
+    """Update system statistics (thread-safe, delegates to StateManager)."""
+    _state_manager.update_stats(stats)
+
+    # Update Prometheus metrics
+    try:
+        from src.utils.metrics import update_from_stats
+        update_from_stats(stats)
+    except Exception:
+        pass  # Metrics are optional, never break pipeline
 
     # Schedule broadcast via stored event loop (safe from any thread)
     _schedule_broadcast("stats_update", stats)
 
 def update_order_flow(symbol: str, flow_data: dict):
-    """Update order flow for a symbol (thread-safe)."""
-    with state_lock:
-        system_state["order_flow"][symbol] = {
-            **flow_data,
-            "last_update": datetime.now(timezone.utc).strftime("%H:%M:%S")
-        }
-
-        # Also update in coins list
-        coin = next((c for c in system_state["coins"] if c["symbol"] == symbol), None)
-        if coin:
-            coin.update(flow_data)
-            coin["last_update"] = "just now"
-
+    """Update order flow for a symbol (thread-safe, delegates to StateManager)."""
+    _state_manager.update_order_flow(symbol, flow_data)
     _schedule_broadcast("order_flow_update", {"symbol": symbol, **flow_data})
 
 def add_signal(signal: dict):
-    """Add a new signal to the dashboard (thread-safe, monotonic IDs)."""
-    global _signal_id_counter
-    now = datetime.now(timezone.utc)
-    with state_lock:
-        _signal_id_counter += 1
-        signal_data = {
-            "id": _signal_id_counter,
-            "time": now.strftime("%H:%M:%S"),
-            "timestamp": now.isoformat(),
-            **signal
-        }
-
-        system_state["signals"].append(signal_data)
-
-        # Keep only last 200 signals
-        if len(system_state["signals"]) > 200:
-            system_state["signals"] = system_state["signals"][-200:]
-
+    """Add a new signal to the dashboard (thread-safe, delegates to StateManager)."""
+    signal_data = _state_manager.add_signal(signal)
     _schedule_broadcast("new_signal", signal_data)
 
 def _schedule_broadcast(event_type: str, data):
@@ -551,8 +528,7 @@ def _schedule_broadcast(event_type: str, data):
 
 def get_monitored_coins() -> List[str]:
     """Get list of currently monitored and active coins (thread-safe)."""
-    with state_lock:
-        return [coin["symbol"] for coin in system_state["coins"] if coin.get("active", True)]
+    return _state_manager.get_monitored_coins()
 
 def get_pending_subscriptions() -> List[dict]:
     """Drain all pending subscription requests from the dashboard."""
@@ -566,19 +542,7 @@ def get_pending_subscriptions() -> List[dict]:
 
 def initialize_coins(initial_coins: List[str]):
     """Initialize dashboard with starting coins (thread-safe)."""
-    with state_lock:
-        system_state["coins"] = [
-            {
-                "symbol": symbol,
-                "active": True,
-                "buy_ratio": 0,
-                "sell_ratio": 0,
-                "large_buys": 0,
-                "large_sells": 0,
-                "last_update": "N/A"
-            }
-            for symbol in initial_coins
-        ]
+    _state_manager.initialize_coins(initial_coins)
 
 # ============================================================================
 # MAIN (for standalone testing)

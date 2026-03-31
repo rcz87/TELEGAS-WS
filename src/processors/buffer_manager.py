@@ -69,17 +69,19 @@ class BufferManager:
         # Logger
         self.logger = setup_logger("BufferManager", "INFO")
         
-    def add_liquidation(self, symbol: str, event: dict):
+    def add_liquidation(self, symbol: str, event):
         """
-        Add liquidation event to buffer (thread-safe)
+        Add liquidation event to buffer (thread-safe).
+
+        Accepts raw dict or LiquidationEvent dataclass.
 
         Args:
             symbol: Trading pair (e.g., "BTCUSDT")
-            event: Liquidation event data
+            event: Liquidation event data (dict or LiquidationEvent)
         """
         try:
-            # Copy to avoid mutating caller's dict
-            event_copy = dict(event)
+            # Accept both typed events and raw dicts
+            event_copy = event.to_dict() if hasattr(event, "to_dict") else dict(event)
             if "timestamp" not in event_copy:
                 event_copy["timestamp"] = int(time.time() * 1000)
 
@@ -103,16 +105,18 @@ class BufferManager:
         except Exception as e:
             self.logger.error(f"Failed to add liquidation: {e}")
     
-    def add_trade(self, symbol: str, event: dict):
+    def add_trade(self, symbol: str, event):
         """
-        Add trade event to buffer (thread-safe)
+        Add trade event to buffer (thread-safe).
+
+        Accepts raw dict or TradeEvent dataclass.
 
         Args:
             symbol: Trading pair (e.g., "ETHUSDT")
-            event: Trade event data
+            event: Trade event data (dict or TradeEvent)
         """
         try:
-            event_copy = dict(event)
+            event_copy = event.to_dict() if hasattr(event, "to_dict") else dict(event)
             if "timestamp" not in event_copy:
                 event_copy["timestamp"] = int(time.time() * 1000)
 

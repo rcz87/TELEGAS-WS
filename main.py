@@ -58,6 +58,7 @@ from src.signals.market_context_filter import MarketContextFilter
 from src.signals.leading_indicator_scorer import LeadingIndicatorScorer
 from src.utils.symbol_normalizer import normalize_symbol, to_base_symbol, display_symbol
 from src.utils.logger import setup_logger
+from src.models.events import parse_liquidation, parse_trade
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -384,10 +385,13 @@ class TeleglasPro:
                     raw_symbol = liq_event.get('symbol', 'UNKNOWN')
                     symbol = normalize_symbol(raw_symbol)
 
+                    # Parse into typed model (safe — returns None on bad data)
+                    typed_event = parse_liquidation(liq_event, symbol=symbol)
+
                     # Add to buffer with normalized symbol
                     self.buffer_manager.add_liquidation(
                         symbol=symbol,
-                        event=liq_event
+                        event=typed_event or liq_event
                     )
 
                     self.stats['liquidations_processed'] += 1
@@ -428,10 +432,13 @@ class TeleglasPro:
                     raw_symbol = trade.get('symbol', 'UNKNOWN')
                     symbol = normalize_symbol(raw_symbol)
 
+                    # Parse into typed model (safe — returns None on bad data)
+                    typed_event = parse_trade(trade, symbol=symbol)
+
                     # Add to buffer with normalized symbol
                     self.buffer_manager.add_trade(
                         symbol=symbol,
-                        event=trade
+                        event=typed_event or trade
                     )
 
                     self.stats['trades_processed'] += 1
@@ -1040,6 +1047,13 @@ class TeleglasPro:
 
             # Update dashboard
             dashboard_api.update_stats(self.stats)
+
+            # Update Prometheus module metrics
+            try:
+                from src.utils.metrics import update_from_module_stats
+                update_from_module_stats(self.stats.get('analyzers', {}))
+            except Exception:
+                pass
 
             # Log every 5 minutes (use elapsed time since last log)
             if uptime - last_log_time >= 300:
@@ -1770,25 +1784,33 @@ def load_config() -> dict:
         with open(config_path) as f:
             config = yaml.safe_load(f)
     else:
-        # Default config matching config.yaml structure
+        # Fallback defaults matching config/config.yaml v4.2 structure
+        logger = logging.getLogger("ConfigLoader")
+        logger.warning("config/config.yaml not found — using hardcoded defaults")
         config = {
             'pairs': {
-                'primary': ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
+                'primary': ['BTCUSDT', 'ETHUSDT']
             },
             'thresholds': {
                 'liquidation_cascade': 2_000_000,
-                'large_order_threshold': 10_000,
-                'accumulation_ratio': 0.65,
-                'distribution_ratio': 0.35
+                'large_order_threshold': 25_000,
+                'accumulation_ratio': 0.72,
+                'distribution_ratio': 0.28,
+                'min_large_orders': 5,
+                'absorption_minimum': 100_000,
+                'funding_rate_extreme': 0.001,
             },
             'signals': {
                 'min_confidence': 70.0,
-                'max_signals_per_hour': 50,
-                'cooldown_minutes': 5
+                'max_signals_per_hour': 10,
+                'cooldown_minutes': 15
             },
             'alerts': {
                 'rate_limit_delay': 3.0,
-                'max_retries': 3
+                'max_retries': 3,
+                'urgent_threshold': 92,
+                'watch_threshold': 85,
+                'info_threshold': 70,
             },
             'buffers': {
                 'max_liquidations': 1000,
@@ -1803,13 +1825,27 @@ def load_config() -> dict:
             'monitoring': {
                 'mode': 'all',
                 'tier1_symbols': ['BTCUSDT', 'ETHUSDT'],
-                'tier2_symbols': ['BNBUSDT', 'SOLUSDT', 'XRPUSDT'],
-                'tier1_cascade': 2_000_000,
-                'tier2_cascade': 200_000,
-                'tier3_cascade': 50_000,
-                'tier1_absorption': 100_000,
-                'tier2_absorption': 20_000,
-                'tier3_absorption': 5_000,
+                'tier2_symbols': ['SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT', 'AVAXUSDT',
+                                  'SUIUSDT', 'ADAUSDT', 'DOTUSDT', 'LINKUSDT', 'LTCUSDT',
+                                  'UNIUSDT', 'AAVEUSDT', 'MATICUSDT'],
+                'tier3_symbols': [],
+                'tier1_cascade': 3_000_000,
+                'tier2_cascade': 500_000,
+                'tier3_cascade': 150_000,
+                'tier4_cascade': 50_000,
+                'tier1_absorption': 200_000,
+                'tier2_absorption': 50_000,
+                'tier3_absorption': 15_000,
+                'tier4_absorption': 5_000,
+                'tier1_cooldown_minutes': 120,
+                'tier2_cooldown_minutes': 60,
+                'tier3_cooldown_minutes': 45,
+                'tier4_cooldown_minutes': 30,
+                'tier1_min_volume_24h': 100_000_000,
+                'tier2_min_volume_24h': 50_000_000,
+                'tier3_min_volume_24h': 15_000_000,
+                'tier4_min_volume_24h': 5_000_000,
+                'fr_extreme_threshold': 0.01,
                 'max_concurrent_analysis': 30
             },
             'analysis': {
@@ -1818,11 +1854,11 @@ def load_config() -> dict:
             },
             'dashboard': {
                 'api_token': '',
-                'cors_origins': ['http://localhost:3000', 'http://127.0.0.1:8081', 'https://teleglas.guardiansofthetoken.org']
+                'cors_origins': ['http://localhost:3000', 'http://127.0.0.1:8081']
             },
             'market_context': {
                 'enabled': True,
-                'poll_interval': 300,
+                'poll_interval': 120,
                 'max_snapshots': 72,
                 'filter_mode': 'normal',
                 'confidence_adjust': True,

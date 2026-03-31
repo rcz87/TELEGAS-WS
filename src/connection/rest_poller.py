@@ -261,69 +261,73 @@ class CoinGlassRestPoller:
             self.logger.info("REST Poller stopped")
 
     async def _poll_all(self):
-        """Poll OI, funding, CVD, and whale data for all symbols."""
-        # Whale alerts: once per cycle (not per-symbol)
+        """Poll OI, funding, CVD, whale, orderbook, and price for all symbols.
+
+        Uses concurrency-limited batching via asyncio.Semaphore to fetch
+        multiple symbols in parallel while respecting API rate limits.
+        """
+        # Concurrency limit: max simultaneous requests to CoinGlass
+        sem = asyncio.Semaphore(5)
+
+        # ── Phase 1: Global endpoints (not per-symbol) ──────────────
         whale_alerts = await self._fetch_whale_alerts()
         if whale_alerts and self.on_whale_data:
             for alert in whale_alerts:
                 await self.on_whale_data(alert)
 
-        await asyncio.sleep(self.request_delay)
-
-        # Funding per exchange: one API call returns ALL symbols
-        # Fetch once, then distribute per-symbol from cache
         all_funding_data = await self._fetch_all_funding_per_exchange()
 
-        await asyncio.sleep(self.request_delay)
+        # ── Phase 2: Per-symbol fetches (concurrent, rate-limited) ──
+        async def _fetch_symbol(symbol: str):
+            """Fetch all data types for one symbol, rate-limited by semaphore."""
+            async with sem:
+                oi = await self._fetch_oi(symbol)
+                if oi and self.on_oi_data:
+                    await self.on_oi_data(oi)
 
-        for symbol in self.symbols:
-            # Fetch OI
-            oi = await self._fetch_oi(symbol)
-            if oi and self.on_oi_data:
-                await self.on_oi_data(oi)
+                await asyncio.sleep(self.request_delay / 2)
 
-            await asyncio.sleep(self.request_delay / 2)
+                funding = await self._fetch_funding(symbol)
+                if funding and self.on_funding_data:
+                    await self.on_funding_data(funding)
 
-            # Fetch Funding (OI-weighted OHLC)
-            funding = await self._fetch_funding(symbol)
-            if funding and self.on_funding_data:
-                await self.on_funding_data(funding)
+                await asyncio.sleep(self.request_delay / 2)
 
-            await asyncio.sleep(self.request_delay / 2)
+                spot_cvd = await self._fetch_spot_cvd(symbol)
+                if spot_cvd and self.on_spot_cvd_data:
+                    await self.on_spot_cvd_data(spot_cvd)
 
-            # Fetch Spot CVD
-            spot_cvd = await self._fetch_spot_cvd(symbol)
-            if spot_cvd and self.on_spot_cvd_data:
-                await self.on_spot_cvd_data(spot_cvd)
+                await asyncio.sleep(self.request_delay / 2)
 
-            await asyncio.sleep(self.request_delay / 2)
+                futures_cvd = await self._fetch_futures_cvd(symbol)
+                if futures_cvd and self.on_futures_cvd_data:
+                    await self.on_futures_cvd_data(futures_cvd)
 
-            # Fetch Futures CVD
-            futures_cvd = await self._fetch_futures_cvd(symbol)
-            if futures_cvd and self.on_futures_cvd_data:
-                await self.on_futures_cvd_data(futures_cvd)
+                await asyncio.sleep(self.request_delay / 2)
 
-            await asyncio.sleep(self.request_delay / 2)
+                ob = await self._fetch_orderbook_delta(symbol)
+                if ob and self.on_orderbook_data:
+                    await self.on_orderbook_data(ob)
 
-            # Fetch Orderbook Delta
-            ob = await self._fetch_orderbook_delta(symbol)
-            if ob and self.on_orderbook_data:
-                await self.on_orderbook_data(ob)
+                # Funding per exchange: from bulk cache (no API call)
+                fpe = self._extract_funding_per_exchange(symbol, all_funding_data)
+                if fpe and self.on_funding_per_exchange_data:
+                    await self.on_funding_per_exchange_data(fpe)
 
-            await asyncio.sleep(self.request_delay / 2)
+                await asyncio.sleep(self.request_delay / 2)
 
-            # Funding Per Exchange: use cached data from bulk fetch
-            fpe = self._extract_funding_per_exchange(symbol, all_funding_data)
-            if fpe and self.on_funding_per_exchange_data:
-                await self.on_funding_per_exchange_data(fpe)
+                price = await self._fetch_price(symbol)
+                if price and self.on_price_data:
+                    await self.on_price_data(price)
 
-            # Fetch Price
-            price = await self._fetch_price(symbol)
-            if price and self.on_price_data:
-                await self.on_price_data(price)
+        # Launch all symbols concurrently (semaphore limits to 5 at a time)
+        tasks = [asyncio.create_task(_fetch_symbol(s)) for s in self.symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Delay between symbols to respect rate limits
-            await asyncio.sleep(self.request_delay)
+        # Log any unexpected exceptions (individual fetch errors already handled)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                self.logger.error(f"Symbol batch error for {self.symbols[i]}: {result}")
 
     async def _fetch_oi(self, symbol: str) -> Optional[OISnapshot]:
         """
