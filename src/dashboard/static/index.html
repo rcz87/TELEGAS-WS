@@ -1998,9 +1998,6 @@ async function fetchSignalLifecycle(){
 // Fetch every 10 seconds
 setInterval(fetchSignalLifecycle,10000);
 fetchSignalLifecycle();
-// Also refresh on coin change (hook into render cycle)
-const _origRender=render;
-render=function(state){_origRender(state);setTimeout(fetchSignalLifecycle,300);};
 
 // PWA
 if('serviceWorker' in navigator){navigator.serviceWorker.register('static/sw.js').catch(()=>{});}
