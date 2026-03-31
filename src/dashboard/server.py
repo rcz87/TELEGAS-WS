@@ -927,6 +927,52 @@ async def startup():
     asyncio.create_task(outcome_checker_loop())
 
 
+# ── Signal Lifecycle Proxy ────────────────────────────
+# Lifecycle endpoints live on the legacy API (port 8081).
+# Proxy them here so the dashboard frontend can access them.
+_LEGACY_API = "http://127.0.0.1:8081"
+
+@app.get("/api/signals/active")
+async def proxy_signals_active():
+    """Proxy to legacy API: all alive primary signals."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{_LEGACY_API}/api/signals/active")
+            return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception:
+        return JSONResponse({"signals": []})
+
+@app.get("/api/signals/primary/{symbol}")
+async def proxy_signals_primary(symbol: str):
+    """Proxy to legacy API: primary signal + recent history for a coin."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{_LEGACY_API}/api/signals/primary/{symbol}")
+            return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception:
+        return JSONResponse({"symbol": symbol, "primary": None, "recent": []})
+
+@app.get("/api/signals/lifecycle")
+async def proxy_signals_lifecycle():
+    """Proxy to legacy API: full lifecycle overview."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{_LEGACY_API}/api/signals/lifecycle")
+            return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception:
+        return JSONResponse({"coins": {}, "stats": {}})
+
+@app.get("/api/calibration")
+async def proxy_calibration():
+    """Proxy to legacy API: confidence calibration table."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{_LEGACY_API}/api/calibration")
+            return JSONResponse(r.json(), status_code=r.status_code)
+    except Exception:
+        return JSONResponse({"table": [], "stats": {}})
+
+
 _base = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=str(_base / "static")), name="static")
 
