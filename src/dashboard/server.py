@@ -512,6 +512,10 @@ async def analyze_coin(request: Request):
         timeseries_block = "\nTIME-SERIES DATA (read carefully — this shows HOW we got here):\n"
         timeseries_block += describe_spark(spot_spark, "SpotCVD")
         timeseries_block += describe_spark(fut_spark, "FuturesCVD")
+        if not spot_spark or len(spot_spark) < 3:
+            timeseries_block += "  ⚠️ SpotCVD data UNAVAILABLE — do NOT reference SpotCVD in analysis.\n"
+        if not fut_spark or len(fut_spark) < 3:
+            timeseries_block += "  ⚠️ FuturesCVD data UNAVAILABLE — do NOT reference FuturesCVD in analysis.\n"
 
         # Whale context from state
         whale_block = ""
@@ -523,11 +527,18 @@ async def analyze_coin(request: Request):
         if whale_alerts:
             relevant = [a for a in whale_alerts if a.get("symbol") in [symbol, "BTC"]]
             if relevant:
-                whale_block = f"\nWHALE ACTIVITY (BTC + {symbol}):\n"
+                whale_block = f"\nWHALE ACTIVITY (BTC + {symbol}) — from Hyperliquid on-chain data:\n"
                 for a in relevant[:8]:
                     whale_block += f"  - {a.get('time','')} {a.get('symbol','')} {a.get('action','')} {a.get('direction','')} ${a.get('value_usd',0):,.0f} @{a.get('entry_price',0)}\n"
+                whale_block += "  NOTE: direction is derived from position_size sign (positive=LONG, negative=SHORT). OPEN=new position, CLOSE=closing position.\n"
+            else:
+                whale_block = f"\nWHALE ACTIVITY: No recent whale alerts for {symbol} or BTC.\n"
+        else:
+            whale_block = "\nWHALE ACTIVITY: NOT AVAILABLE (do NOT mention whale activity).\n"
 
-        if liq_cluster and not liq_cluster.get("error"):
+        has_liq_data = False
+        if liq_cluster and not liq_cluster.get("error") and liq_cluster.get("above", {}).get("price"):
+            has_liq_data = True
             price = liq_cluster.get("price", 0)
             above = liq_cluster.get("above", {})
             below = liq_cluster.get("below", {})
@@ -539,6 +550,8 @@ async def analyze_coin(request: Request):
                 dist = (below["price"] - price) / price * 100 if price else 0
                 liq_block += f"  - BELOW (long liq): ${below['price']:,.1f} size ${below.get('size',0):,.0f} ({dist:.1f}% away)\n"
             whale_block += liq_block
+        else:
+            whale_block += "\nLIQUIDATION MAP: NOT AVAILABLE (do NOT invent liq cluster prices)\n"
 
         if fr_extremes:
             neg = fr_extremes.get("most_negative", [])
@@ -581,12 +594,19 @@ REGIME ANALYSIS (from scoring engine):
 CRITICAL RULES:
 - Read the TIME-SERIES data carefully. A "RISING" CVD that is DECELERATING is very different from one that is ACCELERATING.
 - If SpotCVD just flipped direction → that is a KEY signal, mention it.
-- Liq clusters are MAGNETS — price moves toward them. Factor this into targets.
 - If regime is RANGE and data is conflicting → say NO TRADE.
 - If your past calls on this coin have been wrong → acknowledge it and adjust.
 - If win rate < 50% → be MORE conservative.
 - Only give ENTRY (not "NO ENTRY") when you have HIGH conviction.
 - Price targets must be realistic (0.5-3% for scalp/swing).
+
+DATA INTEGRITY RULES (NEVER VIOLATE):
+- ONLY reference data that is explicitly provided above. Do NOT invent or estimate values.
+- If liquidation cluster data is not provided → write "Target: based on support/resistance (liq map unavailable)" — NEVER invent specific liq cluster prices.
+- If SpotCVD shows "no history" → do NOT mention spot CVD in analysis.
+- If whale data is empty → do NOT mention whale activity.
+- Report CVD values exactly as shown. Do NOT reinterpret the direction or invent cumulative totals.
+- If a field shows 0 or N/A → treat it as missing data, do NOT fabricate a number.
 
 FORMAT (follow exactly):
 REGIME: [your assessment]
