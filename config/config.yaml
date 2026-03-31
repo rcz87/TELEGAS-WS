@@ -325,6 +325,6 @@ market_context:
 
 # Analysis Windows
 analysis:
-  stop_hunt_window: 30           # Seconds
+  stop_hunt_window: 120          # Seconds (2 min — altcoin cascades are slower)
   order_flow_window: 300         # Seconds (5 minutes)
   absorption_window: 30          # Seconds

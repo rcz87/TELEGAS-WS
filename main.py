@@ -787,6 +787,18 @@ class TeleglasPro:
                 order_flow_signal = await self.order_flow_analyzer.analyze(symbol)
                 event_signals = await self.event_detector.analyze(symbol)
 
+                # Log analyzer results for debugging (only when something detected)
+                if stop_hunt_signal:
+                    self.logger.info(
+                        f"🔎 {symbol} StopHunt: {stop_hunt_signal.direction} "
+                        f"vol=${stop_hunt_signal.total_volume:,.0f} conf={stop_hunt_signal.confidence:.0f}%"
+                    )
+                if order_flow_signal:
+                    self.logger.info(
+                        f"🔎 {symbol} OrderFlow: {order_flow_signal.signal_type} "
+                        f"buy_ratio={order_flow_signal.buy_ratio:.0%} conf={order_flow_signal.confidence:.0f}%"
+                    )
+
                 # Generate unified signal
                 trading_signal = await self.signal_generator.generate(
                     symbol=symbol,
