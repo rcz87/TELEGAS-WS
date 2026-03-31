@@ -61,6 +61,8 @@ from src.utils.logger import setup_logger
 from src.models.events import parse_liquidation, parse_trade
 from src.signals.setup_classifier import classify_setup
 from src.signals.feature_logger import FeatureLogger
+from src.ml.dataset_builder import DatasetBuilder
+from src.ml.calibration import CalibrationTable
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -195,6 +197,10 @@ class TeleglasPro:
 
         # Feature logger (ML training data)
         self.feature_logger = FeatureLogger()
+
+        # ML components
+        self.dataset_builder = DatasetBuilder()
+        self.calibration = CalibrationTable()
 
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
@@ -613,8 +619,12 @@ class TeleglasPro:
         try:
             await self.db.connect()
 
-            # Share DB with feature logger
+            # Share DB with feature logger + ML components
             self.feature_logger.set_db(self.db)
+            self.dataset_builder.set_db(self.db)
+
+            # Build calibration table from existing history
+            await self.calibration.build_from_db(self.db)
 
             # Restore confidence scorer state (signal-type level)
             saved_confidence = await self.db.load_confidence_state()
@@ -683,6 +693,9 @@ class TeleglasPro:
 
             # Share DB reference with dashboard for export endpoints
             dashboard_api._db = self.db
+
+            # Share calibration with dashboard API for /api/calibration endpoint
+            dashboard_api._state_manager._calibration = self.calibration
 
         except Exception as e:
             self.logger.error(f"Database init error: {e} (continuing without persistence)")
@@ -1114,6 +1127,8 @@ class TeleglasPro:
                 'market_context_filter': self.market_context_filter.get_stats(),
                 'leading_scorer': self.leading_scorer.get_stats(),
                 'rest_poller': self.rest_poller.get_stats(),
+                'calibration': self.calibration.get_stats(),
+                'feature_logger': self.feature_logger.get_stats(),
             }
 
             # Update dashboard
@@ -1726,7 +1741,23 @@ class TeleglasPro:
                     )
             except Exception as e:
                 self.logger.error(f"Confidence/setup save error: {e}")
-    
+
+            # Rebuild calibration table periodically (every 6 hours)
+            try:
+                if self.calibration.is_stale(max_age_hours=6):
+                    await self.calibration.build_from_db(self.db)
+                    table = self.calibration.get_table()
+                    if table:
+                        self.logger.info(
+                            f"Calibration rebuilt: {len(table)} buckets | "
+                            + " | ".join(
+                                f"{b['bucket']}:{b['win_rate']:.0%}({b['count']})"
+                                for b in table if b['trusted']
+                            )
+                        )
+            except Exception as e:
+                self.logger.error(f"Calibration rebuild error: {e}")
+
     async def run(self):
         """Run the complete system"""
         self.logger.info("=" * 60)

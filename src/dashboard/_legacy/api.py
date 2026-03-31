@@ -387,6 +387,15 @@ async def get_signal_stats(_auth=Depends(verify_token)):
     by_type = await _db.get_signal_stats_by_type()
     return {"overall": stats, "by_type": by_type}
 
+@app.get("/api/calibration")
+async def get_calibration(_rl=Depends(check_rate_limit)):
+    """Get confidence score calibration table (score bucket → observed win rate)."""
+    # Access calibration from main.py via a module-level reference
+    cal = getattr(_state_manager, '_calibration', None)
+    if cal:
+        return {"table": cal.get_table(), "stats": cal.get_stats()}
+    return {"table": [], "stats": {"total_signals": 0, "note": "calibration not yet built"}}
+
 @app.get("/api/signals/history")
 async def get_signal_history(symbol: str = None, limit: int = 100, _auth=Depends(verify_token)):
     """Get signal history from database (persisted across restarts)."""
