@@ -78,8 +78,8 @@ class RestSignalDetector:
 
     def check_cvd_flip(self, symbol: str) -> Optional[RestSignal]:
         """Check if SpotCVD just flipped direction."""
-        spot_history = self.buffer.get_spot_cvd_history(symbol, limit=3)
-        fut_history = self.buffer.get_futures_cvd_history(symbol, limit=3)
+        spot_history = self.buffer.get_spot_cvd_history(symbol, n=3)
+        fut_history = self.buffer.get_futures_cvd_history(symbol, n=3)
 
         if not spot_history or len(spot_history) < 2:
             return None
@@ -140,8 +140,8 @@ class RestSignalDetector:
 
     def check_oi_spike(self, symbol: str) -> Optional[RestSignal]:
         """Check for significant OI change + price movement."""
-        oi_history = self.buffer.get_oi_history(symbol, limit=5)
-        price_history = self.buffer.get_price_history(symbol, limit=2)
+        oi_history = self.buffer.get_oi_history(symbol, n=5)
+        price_history = self.buffer.get_price_history(symbol, limit=2) if hasattr(self.buffer, 'get_price_history') else [self.buffer.get_latest_price(symbol)] if self.buffer.get_latest_price(symbol) else []
 
         if not oi_history or len(oi_history) < 2:
             return None
