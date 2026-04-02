@@ -312,6 +312,13 @@ class CoinGlassRestPoller:
                         self.logger.error("429 exhausted retries")
                         return None
                     if resp.status != 200:
+                        # Extract endpoint path for readable logging
+                        path = url.replace(self.BASE_URL, "")
+                        self.logger.warning(
+                            f"HTTP {resp.status} for {path}"
+                            f" (params={params})"
+                        )
+                        self._stats["errors"] += 1
                         return None
                     return await resp.json()
             except Exception as e:
