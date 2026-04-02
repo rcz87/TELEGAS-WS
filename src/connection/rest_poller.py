@@ -49,6 +49,8 @@ class RateLimiter:
     """
 
     def __init__(self, max_per_minute: int = 90, cooldown_seconds: float = 30.0):
+        if max_per_minute <= 0:
+            raise ValueError(f"max_per_minute must be > 0, got {max_per_minute}")
         self.max_per_minute = max_per_minute
         self.cooldown_seconds = cooldown_seconds
         self._timestamps: deque = deque()

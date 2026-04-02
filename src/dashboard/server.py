@@ -922,6 +922,8 @@ async def auto_push_loop():
                     except Exception:
                         dead.add(ws)
                 clients.difference_update(dead)
+                for ws in dead:
+                    client_coins.pop(ws, None)
 
             if not watched:
                 await asyncio.sleep(45)
@@ -1007,6 +1009,13 @@ async def startup():
     asyncio.create_task(state_poller())
     asyncio.create_task(auto_push_loop())
     asyncio.create_task(outcome_checker_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global _http
+    if _http and not _http.is_closed:
+        await _http.aclose()
 
 
 # ── Signal Lifecycle Proxy ────────────────────────────
