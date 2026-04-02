@@ -168,6 +168,9 @@ class AlertQueue:
             self.logger.warning(
                 f"Max retries ({queued_alert.max_retries}) reached for alert"
             )
+            # Note: _total_failed is NOT incremented here because the caller
+            # must call mark_processed(success=False) before retry(), which
+            # already increments _total_failed for the final failed attempt.
             return False
 
         # Increment retry count
