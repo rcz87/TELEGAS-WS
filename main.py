@@ -29,6 +29,7 @@ import json as _json
 import sys
 import signal
 import os
+import time
 import threading
 from pathlib import Path
 from dotenv import load_dotenv
@@ -68,6 +69,7 @@ from src.ml.ml_inference import MLInferenceEngine
 from src.ml.guardrails import MLGuardrails
 from src.signals.signal_lifecycle import SignalLifecycleManager
 from src.signals.rest_signal_detector import RestSignalDetector
+from src.alerts.movement_detector import MovementDetector
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -277,6 +279,12 @@ class TeleglasPro:
         self.PROACTIVE_MAX_PER_CYCLE = 3     # Max alerts per scan cycle
         self.PROACTIVE_MAX_PER_HOUR = 5      # Max proactive alerts per hour
         self._proactive_hourly: list = []    # Timestamps for hourly rate limit
+
+        # Telegram watchlist — only these coins send Telegram alerts
+        self.TELEGRAM_WATCHLIST = {"BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "DOGE", "SUI", "LINK", "ADA", "DOT", "NEAR", "APT", "MATIC", "ARB", "OP", "HYPE", "TRUMP", "WIF", "PEPE"}
+
+        # Movement detector — detect quiet-move, flush, absorption
+        self.movement_detector = MovementDetector()
 
         # Debouncing (FIX: Prevent task explosion)
         self.analysis_locks = {}  # Per-symbol locks
@@ -825,8 +833,12 @@ class TeleglasPro:
                     f"conf={signal.confidence:.0f}% sources={signal.sources}"
                 )
 
-                # Telegram gate: confidence + active coin + CVD veto + dedup
-                send_telegram = signal.confidence >= 70 and self._is_coin_active(symbol)
+                # Telegram gate: watchlist + confidence + active coin + CVD veto + dedup
+                send_telegram = (
+                    base_symbol in self.TELEGRAM_WATCHLIST
+                    and signal.confidence >= 70
+                    and self._is_coin_active(symbol)
+                )
 
                 if send_telegram:
                     spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
@@ -1242,8 +1254,8 @@ class TeleglasPro:
                 # Register with lifecycle manager (expiry, primary selection)
                 lifecycle_data = self.lifecycle.ingest(signal_dict)
 
-                # Check dashboard toggle AND market context filter
-                if self._is_coin_active(symbol) and filter_passed:
+                # Check watchlist, dashboard toggle AND market context filter
+                if base_symbol in self.TELEGRAM_WATCHLIST and self._is_coin_active(symbol) and filter_passed:
                     formatted_message = self.message_formatter.format_signal(trading_signal)
                     await self.alert_queue.add(
                         formatted_message,
@@ -1513,7 +1525,7 @@ class TeleglasPro:
                             base_symbol, direction, best, price, ctx
                         )
 
-                        if msg and self.telegram_bot:
+                        if msg and self.telegram_bot and base_symbol in self.TELEGRAM_WATCHLIST:
                             await self.alert_queue.add(msg, priority=2)
                             self._proactive_cooldowns[base_symbol] = now.timestamp()
                             self._proactive_hourly.append(now.timestamp())
