@@ -31,12 +31,66 @@ Note: timestamps are in milliseconds, values are strings.
 import asyncio
 import random
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 import aiohttp
 
 from ..utils.logger import setup_logger
+
+
+class RateLimiter:
+    """
+    Token-bucket rate limiter for CoinGlass API.
+
+    Tracks calls in a sliding window and enforces max calls/min.
+    When a 429 is received, enters a cooldown period.
+    """
+
+    def __init__(self, max_per_minute: int = 90, cooldown_seconds: float = 30.0):
+        self.max_per_minute = max_per_minute
+        self.cooldown_seconds = cooldown_seconds
+        self._timestamps: deque = deque()
+        self._cooldown_until: float = 0.0
+        self._logger = setup_logger("RateLimiter", "INFO")
+
+    async def acquire(self):
+        """Wait until a request slot is available."""
+        while True:
+            now = time.monotonic()
+
+            # Respect 429 cooldown
+            if now < self._cooldown_until:
+                wait = self._cooldown_until - now
+                self._logger.warning(f"Rate limit cooldown: waiting {wait:.1f}s")
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+
+            # Clean old timestamps (older than 60s)
+            while self._timestamps and self._timestamps[0] < now - 60:
+                self._timestamps.popleft()
+
+            if len(self._timestamps) < self.max_per_minute:
+                self._timestamps.append(now)
+                return
+
+            # Wait until oldest entry expires
+            wait = 60.0 - (now - self._timestamps[0]) + 0.1
+            self._logger.debug(f"Rate limiter: {len(self._timestamps)}/{self.max_per_minute} calls/min, waiting {wait:.1f}s")
+            await asyncio.sleep(wait)
+
+    def on_429(self):
+        """Called when a 429 response is received. Enters cooldown."""
+        self._cooldown_until = time.monotonic() + self.cooldown_seconds
+        self._logger.warning(f"429 received! Cooling down for {self.cooldown_seconds}s")
+
+    @property
+    def current_usage(self) -> int:
+        now = time.monotonic()
+        while self._timestamps and self._timestamps[0] < now - 60:
+            self._timestamps.popleft()
+        return len(self._timestamps)
 
 
 @dataclass
@@ -156,6 +210,7 @@ class CoinGlassRestPoller:
         on_orderbook_data: Optional[Callable] = None,
         on_funding_per_exchange_data: Optional[Callable] = None,
         on_price_data: Optional[Callable] = None,
+        rate_limit_per_minute: int = 90,
     ):
         """
         Initialize REST poller.
@@ -173,6 +228,7 @@ class CoinGlassRestPoller:
             on_orderbook_data: Async callback receiving OrderbookDelta
             on_funding_per_exchange_data: Async callback receiving FundingPerExchange
             on_price_data: Async callback receiving PriceSnapshot
+            rate_limit_per_minute: Max API calls per minute (default 90)
         """
         self.api_key = api_key
         self.symbols = list(symbols)
@@ -188,6 +244,10 @@ class CoinGlassRestPoller:
         self.on_price_data = on_price_data
         self.logger = setup_logger("RestPoller", "INFO")
         self._session: Optional[aiohttp.ClientSession] = None
+        self._rate_limiter = RateLimiter(
+            max_per_minute=rate_limit_per_minute,
+            cooldown_seconds=30.0,
+        )
         self._stats = {
             "polls_completed": 0,
             "oi_fetches": 0,
@@ -199,6 +259,7 @@ class CoinGlassRestPoller:
             "funding_per_exchange_fetches": 0,
             "price_fetches": 0,
             "errors": 0,
+            "rate_limited": 0,
             "last_poll_time": 0,
         }
 
@@ -224,11 +285,44 @@ class CoinGlassRestPoller:
         mapped = self._PAIR_PREFIX_MAP.get(symbol, symbol)
         return f"{mapped}USDT"
 
+    async def _rate_limited_get(self, url: str, params: dict = None) -> Optional[dict]:
+        """
+        Make a rate-limited GET request with 429 retry.
+
+        Returns parsed JSON dict on success, None on failure.
+        """
+        max_retries = 3
+        for attempt in range(max_retries):
+            await self._rate_limiter.acquire()
+            try:
+                async with self._session.get(url, params=params) as resp:
+                    if resp.status == 429:
+                        self._stats["rate_limited"] += 1
+                        self._rate_limiter.on_429()
+                        if attempt < max_retries - 1:
+                            backoff = (2 ** attempt) * 5  # 5s, 10s, 20s
+                            self.logger.warning(
+                                f"429 Too Many Requests, retry {attempt + 1}/{max_retries} "
+                                f"in {backoff}s"
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
+                        self.logger.error("429 exhausted retries")
+                        return None
+                    if resp.status != 200:
+                        return None
+                    return await resp.json()
+            except Exception as e:
+                self.logger.error(f"Request error: {e}")
+                return None
+        return None
+
     async def start(self, shutdown_event: asyncio.Event):
         """Main polling loop. Runs until shutdown_event is set."""
         self.logger.info(
             f"REST Poller started: {len(self.symbols)} symbols, "
-            f"interval={self.poll_interval}s"
+            f"interval={self.poll_interval}s, "
+            f"rate_limit={self._rate_limiter.max_per_minute}/min"
         )
         self._session = aiohttp.ClientSession(
             headers={"CG-API-KEY": self.api_key, "Accept": "application/json"},
@@ -321,7 +415,7 @@ class CoinGlassRestPoller:
                 if price and self.on_price_data:
                     await self.on_price_data(price)
 
-        # Launch all symbols concurrently (semaphore limits to 5 at a time)
+        # Launch all symbols concurrently (semaphore limits to 3 at a time)
         tasks = [asyncio.create_task(_fetch_symbol(s)) for s in self.symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -340,13 +434,9 @@ class CoinGlassRestPoller:
         try:
             url = f"{self.BASE_URL}/api/futures/open-interest/aggregated-history"
             params = {"symbol": symbol, "interval": "1h", "limit": 2}
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    self.logger.warning(
-                        f"OI fetch failed for {symbol}: HTTP {resp.status}"
-                    )
-                    return None
-                data = await resp.json()
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(
@@ -396,13 +486,9 @@ class CoinGlassRestPoller:
         try:
             url = f"{self.BASE_URL}/api/futures/funding-rate/oi-weight-history"
             params = {"symbol": symbol, "interval": "1h", "limit": 2}
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    self.logger.warning(
-                        f"Funding fetch failed for {symbol}: HTTP {resp.status}"
-                    )
-                    return None
-                data = await resp.json()
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(
@@ -489,11 +575,9 @@ class CoinGlassRestPoller:
                 "interval": "5m",
                 "limit": 12,
             }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    self.logger.warning(f"SpotCVD fetch failed for {symbol}: HTTP {resp.status}")
-                    return None
-                data = await resp.json()
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(f"SpotCVD API error for {symbol}: {data.get('msg', 'unknown')}")
@@ -547,11 +631,9 @@ class CoinGlassRestPoller:
                 "interval": "5m",
                 "limit": 12,
             }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    self.logger.warning(f"FuturesCVD fetch failed for {symbol}: HTTP {resp.status}")
-                    return None
-                data = await resp.json()
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(f"FuturesCVD API error for {symbol}: {data.get('msg', 'unknown')}")
@@ -597,11 +679,9 @@ class CoinGlassRestPoller:
         """
         try:
             url = f"{self.BASE_URL}/api/hyperliquid/whale-alert"
-            async with self._session.get(url) as resp:
-                if resp.status != 200:
-                    self.logger.warning(f"Whale alert fetch failed: HTTP {resp.status}")
-                    return []
-                data = await resp.json()
+            data = await self._rate_limited_get(url)
+            if data is None:
+                return []
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(f"Whale API error: {data.get('msg', 'unknown')}")
@@ -660,11 +740,9 @@ class CoinGlassRestPoller:
                 "limit": 1,
                 "range": "1",
             }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    self.logger.warning(f"Orderbook fetch failed for {symbol}: HTTP {resp.status}")
-                    return None
-                data = await resp.json()
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(f"Orderbook API error for {symbol}: {data.get('msg', 'unknown')}")
@@ -709,11 +787,9 @@ class CoinGlassRestPoller:
         """
         try:
             url = f"{self.BASE_URL}/api/futures/funding-rate/exchange-list"
-            async with self._session.get(url) as resp:
-                if resp.status != 200:
-                    self.logger.warning(f"FundingPerEx bulk fetch failed: HTTP {resp.status}")
-                    return []
-                data = await resp.json()
+            data = await self._rate_limited_get(url)
+            if data is None:
+                return []
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(f"FundingPerEx API error: {data.get('msg', 'unknown')}")
@@ -779,11 +855,9 @@ class CoinGlassRestPoller:
                 "interval": "1d",
                 "limit": 2,
             }
-            async with self._session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    self.logger.warning(f"Price fetch failed for {symbol}: HTTP {resp.status}")
-                    return None
-                data = await resp.json()
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
 
             if str(data.get("code", "")) != "0":
                 self.logger.warning(f"Price API error for {symbol}: {data.get('msg', 'unknown')}")
@@ -829,4 +903,6 @@ class CoinGlassRestPoller:
 
     def get_stats(self) -> dict:
         """Get poller statistics."""
-        return dict(self._stats)
+        stats = dict(self._stats)
+        stats["rate_limit_usage"] = f"{self._rate_limiter.current_usage}/{self._rate_limiter.max_per_minute}/min"
+        return stats

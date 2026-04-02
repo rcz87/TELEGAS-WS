@@ -310,7 +310,8 @@ watchlist:
 # Market Context (OI + Funding Rate from CoinGlass REST API)
 market_context:
   enabled: true
-  poll_interval: 180             # Seconds between REST API polls (3 minutes)
+  poll_interval: 300             # Seconds between REST API polls (5 minutes)
+  rate_limit_per_minute: 90      # Max CoinGlass API calls/min (leave room for MCP/dashboard)
   max_snapshots: 72              # Rolling buffer size per symbol (6 hours at 5-min)
   filter_mode: "normal"          # "strict" = only FAVORABLE, "normal" = block UNFAVORABLE, "permissive" = pass all
   confidence_adjust: true        # Adjust confidence based on market context

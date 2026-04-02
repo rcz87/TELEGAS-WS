@@ -180,7 +180,7 @@ class TeleglasPro:
         self.rest_poller = CoinGlassRestPoller(
             api_key=coinglass_config.get('api_key', ''),
             symbols=rest_symbols,
-            poll_interval=market_context_config.get('poll_interval', 120),
+            poll_interval=market_context_config.get('poll_interval', 300),
             request_delay=0.25,
             on_oi_data=self._on_oi_data,
             on_funding_data=self._on_funding_data,
@@ -190,6 +190,7 @@ class TeleglasPro:
             on_orderbook_data=self._on_orderbook_data if market_context_config.get('orderbook_enabled', True) else None,
             on_funding_per_exchange_data=self._on_funding_per_exchange_data,
             on_price_data=self._on_price_data if market_context_config.get('price_enabled', True) else None,
+            rate_limit_per_minute=market_context_config.get('rate_limit_per_minute', 90),
         )
 
         # Signal outcome tracker (with DB callback for persistence)

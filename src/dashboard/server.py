@@ -245,16 +245,78 @@ async def get_http() -> httpx.AsyncClient:
     return _http
 
 
+# ── TTL Cache for CoinGlass responses ─────────────────
+# Prevents duplicate API calls when multiple clients watch the same coin
+# and avoids hammering the API from auto_push_loop
+
+_cg_cache: Dict[str, tuple] = {}  # key -> (data, timestamp)
+_CG_CACHE_TTL = 25  # seconds (auto_push runs every 30s, so 25s cache avoids double-fetch)
+_cg_429_until: float = 0.0  # global 429 cooldown timestamp
+
+async def _cached_cg_get(url: str, params: dict = None, cache_ttl: int = None) -> dict | list | None:
+    """
+    CoinGlass GET with TTL cache and 429 backoff.
+
+    Returns cached response if fresh, otherwise fetches from API.
+    On 429, enters 30s cooldown and returns cached data (even if stale) or None.
+    """
+    global _cg_429_until
+
+    ttl = cache_ttl or _CG_CACHE_TTL
+    cache_key = f"{url}|{json.dumps(params or {}, sort_keys=True)}"
+    now = _time.time()
+
+    # Return cached if still fresh
+    if cache_key in _cg_cache:
+        cached_data, cached_at = _cg_cache[cache_key]
+        if now - cached_at < ttl:
+            return cached_data
+
+    # If in 429 cooldown, return stale cache or None
+    if now < _cg_429_until:
+        if cache_key in _cg_cache:
+            return _cg_cache[cache_key][0]  # stale but better than nothing
+        return None
+
+    try:
+        http = await get_http()
+        resp = await http.get(url, params=params)
+
+        if resp.status_code == 429:
+            _cg_429_until = now + 30.0  # 30s cooldown
+            if cache_key in _cg_cache:
+                return _cg_cache[cache_key][0]  # return stale
+            return None
+
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        _cg_cache[cache_key] = (data, now)
+
+        # Evict old cache entries (keep max 200)
+        if len(_cg_cache) > 200:
+            oldest_key = min(_cg_cache, key=lambda k: _cg_cache[k][1])
+            del _cg_cache[oldest_key]
+
+        return data
+    except Exception:
+        # On error, return stale cache if available
+        if cache_key in _cg_cache:
+            return _cg_cache[cache_key][0]
+        return None
+
+
 # ── CoinGlass fetch functions ──────────────────────────
 
 async def fetch_liq_cluster(symbol: str) -> dict:
     """Fetch liquidation clusters from recent liq orders — aggregate by price zone."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/futures/liquidation/order", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/futures/liquidation/order", params={
             "symbol": symbol, "range": "24h",
         })
-        data = resp.json()
+        if data is None:
+            return {"error": "API unavailable (rate limited)"}
         if str(data.get("code")) != "0":
             return {"error": data.get("msg", "API error")}
 
@@ -309,11 +371,11 @@ async def fetch_liq_cluster(symbol: str) -> dict:
 async def fetch_cvd_history(symbol: str) -> list:
     """Fetch 20 SpotCVD data points."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/spot/aggregated-cvd/history", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/spot/aggregated-cvd/history", params={
             "exchange_list": "Binance", "symbol": symbol, "interval": "5m", "limit": 20,
         })
-        data = resp.json()
+        if data is None:
+            return []
         if str(data.get("code")) != "0":
             return []
         candles = data.get("data", [])
@@ -325,11 +387,11 @@ async def fetch_cvd_history(symbol: str) -> list:
 async def fetch_taker(symbol: str) -> dict:
     """Fetch taker buy/sell volume (last 3 x 5m candles = 15min)."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/futures/aggregated-cvd/history", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/futures/aggregated-cvd/history", params={
             "exchange_list": "Binance", "symbol": symbol, "interval": "5m", "limit": 3,
         })
-        data = resp.json()
+        if data is None:
+            return {"buy": 0, "sell": 0, "net": 0}
         if str(data.get("code")) != "0":
             return {"buy": 0, "sell": 0, "net": 0}
         candles = data.get("data", [])
@@ -343,12 +405,12 @@ async def fetch_taker(symbol: str) -> dict:
 async def fetch_long_short(symbol: str) -> dict:
     """Fetch global long/short account ratio from Binance (5m interval for freshness)."""
     try:
-        http = await get_http()
         pair = f"{symbol}USDT"
-        resp = await http.get(f"{CG_BASE}/api/futures/global-long-short-account-ratio/history", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/futures/global-long-short-account-ratio/history", params={
             "symbol": pair, "exchange": "Binance", "interval": "5m", "limit": 1,
         })
-        data = resp.json()
+        if data is None:
+            return {"long_pct": 50, "short_pct": 50}
         if str(data.get("code")) != "0":
             return {"long_pct": 50, "short_pct": 50}
         candles = data.get("data", [])
@@ -732,9 +794,9 @@ async def state_poller():
 async def fetch_whale_positions() -> list:
     """Build active whale positions from recent alerts — OPEN without matching CLOSE."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 100})
-        data = resp.json()
+        data = await _cached_cg_get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 100})
+        if data is None:
+            return []
         if str(data.get("code")) != "0":
             return []
 
@@ -809,9 +871,9 @@ async def fetch_whale_positions() -> list:
 async def fetch_whale_alerts() -> list:
     """Fetch latest whale alerts from Hyperliquid via CoinGlass."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 20})
-        data = resp.json()
+        data = await _cached_cg_get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 20})
+        if data is None:
+            return []
         if str(data.get("code")) != "0":
             return []
         alerts = []
@@ -838,7 +900,7 @@ async def fetch_whale_alerts() -> list:
 
 
 async def auto_push_loop():
-    """Every 30s, auto-push liq_cluster + cvd_history + taker + long_short + whales."""
+    """Every 45s, auto-push liq_cluster + cvd_history + taker + long_short + whales."""
     await asyncio.sleep(10)
     while True:
         try:
@@ -862,7 +924,7 @@ async def auto_push_loop():
                 clients.difference_update(dead)
 
             if not watched:
-                await asyncio.sleep(30)
+                await asyncio.sleep(45)
                 continue
 
             for symbol in watched:
@@ -892,7 +954,7 @@ async def auto_push_loop():
                         pass
         except Exception:
             pass
-        await asyncio.sleep(30)
+        await asyncio.sleep(45)
 
 
 async def outcome_checker_loop():
