@@ -215,13 +215,13 @@ class MessageFormatter:
             if sane_rates:
                 sorted_rates = sorted(sane_rates.items(), key=lambda x: abs(x[1]), reverse=True)
                 for exchange, rate in sorted_rates[:5]:
-                    lines.append(f"{exchange:9s}: {rate:+.4f}%")
+                    lines.append(f"{exchange:9s}: {rate * 100:+.4f}%")
             elif is_sane_fr(fr):
-                lines.append(f"Avg      : {fr:+.4f}%")
+                lines.append(f"Avg      : {fr * 100:+.4f}%")
             else:
                 lines.append(f"Avg      : N/A (data unavailable)")
         elif is_sane_fr(fr):
-            lines.append(f"Avg      : {fr:+.4f}%")
+            lines.append(f"Avg      : {fr * 100:+.4f}%")
         else:
             lines.append(f"Avg      : N/A (data unavailable)")
         lines.append(f"Alignment: {funding_align}")

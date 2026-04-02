@@ -895,7 +895,7 @@ class TeleglasPro:
                                 lines.append("")
                                 lines.append("FUNDING RATE")
                                 for ex, rate in sorted(sane.items(), key=lambda x: abs(x[1]), reverse=True)[:5]:
-                                    lines.append(f"{ex:9s}: {rate:+.4f}%")
+                                    lines.append(f"{ex:9s}: {rate * 100:+.4f}%")
 
                         # Price action
                         if price_snap:
@@ -1820,11 +1820,13 @@ class TeleglasPro:
         per_exchange = ctx.get('funding_per_exchange', {})
         fr = ctx.get('funding_rate', 0)
         if per_exchange:
-            fr_lines.append("\U0001f4b8 *FUNDING RATE*")
-            for exchange, rate in sorted(per_exchange.items(), key=lambda x: abs(x[1]), reverse=True)[:5]:
-                fr_lines.append(f"{exchange:9s}: {rate*100:+.4f}%")
-            fr_lines.append(f"Alignment: {ctx.get('funding_alignment', 'NEUTRAL')}")
-        elif fr != 0:
+            sane = {k: v for k, v in per_exchange.items() if abs(v) < 0.01}
+            if sane:
+                fr_lines.append("\U0001f4b8 *FUNDING RATE*")
+                for exchange, rate in sorted(sane.items(), key=lambda x: abs(x[1]), reverse=True)[:5]:
+                    fr_lines.append(f"{exchange:9s}: {rate*100:+.4f}%")
+                fr_lines.append(f"Alignment: {ctx.get('funding_alignment', 'NEUTRAL')}")
+        elif fr != 0 and abs(fr) < 0.01:
             fr_lines.append("\U0001f4b8 *FUNDING RATE*")
             fr_lines.append(f"Avg      : {fr*100:+.4f}%")
             fr_lines.append(f"Alignment: {ctx.get('funding_alignment', 'NEUTRAL')}")
