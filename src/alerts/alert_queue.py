@@ -118,7 +118,7 @@ class AlertQueue:
             QueuedAlert or None if timeout
         """
         try:
-            if timeout:
+            if timeout is not None:
                 queued_alert = await asyncio.wait_for(
                     self.queue.get(),
                     timeout=timeout
@@ -153,7 +153,10 @@ class AlertQueue:
     
     async def retry(self, queued_alert: QueuedAlert) -> bool:
         """
-        Re-queue failed alert for retry
+        Re-queue failed alert for retry.
+
+        Must call mark_processed() BEFORE calling retry() to keep
+        task_done accounting correct.
 
         Args:
             queued_alert: Failed alert to retry
@@ -163,9 +166,8 @@ class AlertQueue:
         """
         if queued_alert.retry_count >= queued_alert.max_retries:
             self.logger.warning(
-                f"⚠️ Max retries ({queued_alert.max_retries}) reached for alert"
+                f"Max retries ({queued_alert.max_retries}) reached for alert"
             )
-            self._total_failed += 1
             return False
 
         # Increment retry count
@@ -176,7 +178,7 @@ class AlertQueue:
         retry_priority = min(queued_alert.priority + 1, 3)
 
         self.logger.info(
-            f"🔄 Retrying alert (attempt {queued_alert.retry_count}/{queued_alert.max_retries})"
+            f"Retrying alert (attempt {queued_alert.retry_count}/{queued_alert.max_retries})"
         )
 
         # Re-queue: preserve retry_count by reusing the object with updated priority
@@ -270,7 +272,7 @@ class AlertQueue:
             timeout: Maximum wait time (None = wait forever)
         """
         try:
-            if timeout:
+            if timeout is not None:
                 await asyncio.wait_for(self.queue.join(), timeout=timeout)
             else:
                 await self.queue.join()

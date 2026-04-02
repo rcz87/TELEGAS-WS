@@ -1350,10 +1350,10 @@ class TeleglasPro:
                             await self.alert_queue.mark_processed(success=True)
                             self.stats['alerts_sent'] += 1
                         else:
+                            # Mark task_done BEFORE retry to keep queue accounting correct
+                            await self.alert_queue.mark_processed(success=False)
                             retried = await self.alert_queue.retry(queued_alert)
                             if not retried:
-                                # Max retries exhausted — mark as failed so queue doesn't hang
-                                await self.alert_queue.mark_processed(success=False)
                                 self.logger.warning(f"Alert dropped after {queued_alert.max_retries} retries")
                     else:
                         # No Telegram - just log

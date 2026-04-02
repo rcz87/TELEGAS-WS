@@ -113,7 +113,7 @@ class RestSignalDetector:
         # Check minimum delta
         tier = self._get_tier(symbol)
         min_delta = CVD_MIN_DELTA.get(tier, 10_000)
-        delta = abs(current.cvd_latest - (previous.cvd_latest if previous else 0))
+        delta = abs(current.cvd_latest - previous.cvd_latest)
 
         if delta < min_delta:
             return None
