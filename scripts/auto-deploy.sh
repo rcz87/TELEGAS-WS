@@ -5,10 +5,10 @@
 #
 # Usage:
 #   # One-shot check (for cron):
-#   */2 * * * * /root/TELEGAS-WS/scripts/auto-deploy.sh >> /root/TELEGAS-WS/logs/auto-deploy.log 2>&1
+#   */5 * * * * /root/TELEGAS-WS/scripts/auto-deploy.sh >> /root/TELEGAS-WS/logs/auto-deploy.log 2>&1
 #
 #   # Or run as PM2 managed process (loop mode):
-#   pm2 start /root/TELEGAS-WS/scripts/auto-deploy.sh --name auto-deploy --cron "*/2 * * * *" --no-autorestart
+#   pm2 start /root/TELEGAS-WS/scripts/auto-deploy.sh --name auto-deploy --cron "*/5 * * * *" --no-autorestart
 
 set -euo pipefail
 
