@@ -327,8 +327,10 @@ class WebSocketClient:
     
     async def _schedule_reconnect(self):
         """
-        Schedule reconnection by resetting state and calling connect().
-        connect() handles backoff internally with an iterative loop.
+        Schedule reconnection as a NEW task instead of calling connect()
+        directly from _receive_loop. This prevents the race condition where
+        connect() cancels _receive_task (which IS the calling task),
+        causing CancelledError to kill the reconnect.
         """
         if not self._should_reconnect:
             return
@@ -336,8 +338,18 @@ class WebSocketClient:
         self.state = ConnectionState.DISCONNECTED
         self._is_authenticated = False
         self.connection = None
-        await self.connect()
+
+        # Schedule as a new task so _receive_loop's finally block can exit cleanly
+        asyncio.create_task(self._reconnect_after_delay())
     
+    async def _reconnect_after_delay(self):
+        """Reconnect after a brief yield to let the old receive loop exit."""
+        await asyncio.sleep(0.1)
+        try:
+            await self.connect()
+        except Exception as e:
+            self.logger.error(f"Reconnect failed: {e}")
+
     def is_connected(self) -> bool:
         """
         Check if WebSocket is connected

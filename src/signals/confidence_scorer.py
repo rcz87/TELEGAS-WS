@@ -37,6 +37,7 @@ class ConfidenceScorer:
         monitoring = monitoring_config or {}
         self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
         self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
+        self._tier3_symbols = set(monitoring.get('tier3_symbols', []))
         self._tier1_absorption = monitoring.get('tier1_absorption', 200_000)
         self._tier2_absorption = monitoring.get('tier2_absorption', 50_000)
         self._tier3_absorption = monitoring.get('tier3_absorption', 15_000)
@@ -209,6 +210,8 @@ class ConfidenceScorer:
             return self._tier1_absorption
         elif symbol in self._tier2_symbols:
             return self._tier2_absorption
+        elif symbol in self._tier3_symbols:
+            return self._tier3_absorption
         else:
             return self._tier4_absorption
 

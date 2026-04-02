@@ -9,6 +9,7 @@ Previously standalone at /root/tg-dashboard/server.py
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time as _time
@@ -503,8 +504,8 @@ async def analyze_coin(request: Request):
             return JSONResponse({"error": "No coin data"}, status_code=400)
 
         # Get past performance history for this coin (self-evolution)
-        history = _get_recent_history(symbol, limit=5)
-        stats = _get_ai_stats(symbol)
+        history = await asyncio.to_thread(_get_recent_history, symbol, 5)
+        stats = await asyncio.to_thread(_get_ai_stats, symbol)
 
         history_block = ""
         if history:
@@ -722,7 +723,8 @@ DANGER:
 
         # Save to database for tracking
         entry_price = coin_data.get("price", 0)
-        analysis_id = _save_analysis(
+        analysis_id = await asyncio.to_thread(
+            _save_analysis,
             symbol, regime_data.get("regime", "UNKNOWN"),
             ai_bias, ai_grade, regime_data.get("confidence", 0),
             text, entry_price, coin_data, regime_data
@@ -964,15 +966,14 @@ async def outcome_checker_loop():
     await asyncio.sleep(30)
     while True:
         try:
-            _check_outcomes()
+            await asyncio.to_thread(_check_outcomes)
         except Exception:
             pass
         await asyncio.sleep(60)
 
 
-@app.get("/api/ai-history")
-async def ai_history(symbol: str = None, limit: int = 20):
-    """Get AI analysis history with outcomes."""
+def _query_ai_history(symbol: str = None, limit: int = 20) -> list:
+    """Query AI analysis history (sync, run via to_thread)."""
     con = sqlite3.connect(str(_AI_DB))
     con.row_factory = sqlite3.Row
     if symbol:
@@ -986,13 +987,19 @@ async def ai_history(symbol: str = None, limit: int = 20):
             (limit,)
         ).fetchall()
     con.close()
-    return JSONResponse([dict(r) for r in rows])
+    return [dict(r) for r in rows]
+
+@app.get("/api/ai-history")
+async def ai_history(symbol: str = None, limit: int = 20):
+    """Get AI analysis history with outcomes."""
+    result = await asyncio.to_thread(_query_ai_history, symbol, limit)
+    return JSONResponse(result)
 
 
 @app.get("/api/ai-stats")
 async def ai_stats_endpoint(symbol: str = None):
     """Get AI win/loss stats per symbol per regime."""
-    stats = _get_ai_stats(symbol)
+    stats = await asyncio.to_thread(_get_ai_stats, symbol)
     # Calculate overall
     total = sum(s["total"] for s in stats)
     wins = sum(s["wins"] for s in stats)
@@ -1004,11 +1011,25 @@ async def ai_stats_endpoint(symbol: str = None):
     })
 
 
+_logger = logging.getLogger("tg-dashboard")
+
+def _task_done_callback(task: asyncio.Task):
+    """Log exceptions from background tasks instead of silently swallowing them."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        _logger.error(f"Background task {task.get_name()} crashed: {exc}", exc_info=exc)
+
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(state_poller())
-    asyncio.create_task(auto_push_loop())
-    asyncio.create_task(outcome_checker_loop())
+    for coro, name in [
+        (state_poller(), "state_poller"),
+        (auto_push_loop(), "auto_push_loop"),
+        (outcome_checker_loop(), "outcome_checker"),
+    ]:
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(_task_done_callback)
 
 
 @app.on_event("shutdown")
