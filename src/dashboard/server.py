@@ -9,6 +9,7 @@ Previously standalone at /root/tg-dashboard/server.py
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time as _time
@@ -245,16 +246,78 @@ async def get_http() -> httpx.AsyncClient:
     return _http
 
 
+# ── TTL Cache for CoinGlass responses ─────────────────
+# Prevents duplicate API calls when multiple clients watch the same coin
+# and avoids hammering the API from auto_push_loop
+
+_cg_cache: Dict[str, tuple] = {}  # key -> (data, timestamp)
+_CG_CACHE_TTL = 25  # seconds (auto_push runs every 30s, so 25s cache avoids double-fetch)
+_cg_429_until: float = 0.0  # global 429 cooldown timestamp
+
+async def _cached_cg_get(url: str, params: dict = None, cache_ttl: int = None) -> dict | list | None:
+    """
+    CoinGlass GET with TTL cache and 429 backoff.
+
+    Returns cached response if fresh, otherwise fetches from API.
+    On 429, enters 30s cooldown and returns cached data (even if stale) or None.
+    """
+    global _cg_429_until
+
+    ttl = cache_ttl or _CG_CACHE_TTL
+    cache_key = f"{url}|{json.dumps(params or {}, sort_keys=True)}"
+    now = _time.time()
+
+    # Return cached if still fresh
+    if cache_key in _cg_cache:
+        cached_data, cached_at = _cg_cache[cache_key]
+        if now - cached_at < ttl:
+            return cached_data
+
+    # If in 429 cooldown, return stale cache or None
+    if now < _cg_429_until:
+        if cache_key in _cg_cache:
+            return _cg_cache[cache_key][0]  # stale but better than nothing
+        return None
+
+    try:
+        http = await get_http()
+        resp = await http.get(url, params=params)
+
+        if resp.status_code == 429:
+            _cg_429_until = now + 30.0  # 30s cooldown
+            if cache_key in _cg_cache:
+                return _cg_cache[cache_key][0]  # return stale
+            return None
+
+        if resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        _cg_cache[cache_key] = (data, now)
+
+        # Evict old cache entries (keep max 200)
+        if len(_cg_cache) > 200:
+            oldest_key = min(_cg_cache, key=lambda k: _cg_cache[k][1])
+            del _cg_cache[oldest_key]
+
+        return data
+    except Exception:
+        # On error, return stale cache if available
+        if cache_key in _cg_cache:
+            return _cg_cache[cache_key][0]
+        return None
+
+
 # ── CoinGlass fetch functions ──────────────────────────
 
 async def fetch_liq_cluster(symbol: str) -> dict:
     """Fetch liquidation clusters from recent liq orders — aggregate by price zone."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/futures/liquidation/order", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/futures/liquidation/order", params={
             "symbol": symbol, "range": "24h",
         })
-        data = resp.json()
+        if data is None:
+            return {"error": "API unavailable (rate limited)"}
         if str(data.get("code")) != "0":
             return {"error": data.get("msg", "API error")}
 
@@ -309,11 +372,11 @@ async def fetch_liq_cluster(symbol: str) -> dict:
 async def fetch_cvd_history(symbol: str) -> list:
     """Fetch 20 SpotCVD data points."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/spot/aggregated-cvd/history", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/spot/aggregated-cvd/history", params={
             "exchange_list": "Binance", "symbol": symbol, "interval": "5m", "limit": 20,
         })
-        data = resp.json()
+        if data is None:
+            return []
         if str(data.get("code")) != "0":
             return []
         candles = data.get("data", [])
@@ -325,11 +388,11 @@ async def fetch_cvd_history(symbol: str) -> list:
 async def fetch_taker(symbol: str) -> dict:
     """Fetch taker buy/sell volume (last 3 x 5m candles = 15min)."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/futures/aggregated-cvd/history", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/futures/aggregated-cvd/history", params={
             "exchange_list": "Binance", "symbol": symbol, "interval": "5m", "limit": 3,
         })
-        data = resp.json()
+        if data is None:
+            return {"buy": 0, "sell": 0, "net": 0}
         if str(data.get("code")) != "0":
             return {"buy": 0, "sell": 0, "net": 0}
         candles = data.get("data", [])
@@ -343,12 +406,12 @@ async def fetch_taker(symbol: str) -> dict:
 async def fetch_long_short(symbol: str) -> dict:
     """Fetch global long/short account ratio from Binance (5m interval for freshness)."""
     try:
-        http = await get_http()
         pair = f"{symbol}USDT"
-        resp = await http.get(f"{CG_BASE}/api/futures/global-long-short-account-ratio/history", params={
+        data = await _cached_cg_get(f"{CG_BASE}/api/futures/global-long-short-account-ratio/history", params={
             "symbol": pair, "exchange": "Binance", "interval": "5m", "limit": 1,
         })
-        data = resp.json()
+        if data is None:
+            return {"long_pct": 50, "short_pct": 50}
         if str(data.get("code")) != "0":
             return {"long_pct": 50, "short_pct": 50}
         candles = data.get("data", [])
@@ -441,8 +504,8 @@ async def analyze_coin(request: Request):
             return JSONResponse({"error": "No coin data"}, status_code=400)
 
         # Get past performance history for this coin (self-evolution)
-        history = _get_recent_history(symbol, limit=5)
-        stats = _get_ai_stats(symbol)
+        history = await asyncio.to_thread(_get_recent_history, symbol, 5)
+        stats = await asyncio.to_thread(_get_ai_stats, symbol)
 
         history_block = ""
         if history:
@@ -660,7 +723,8 @@ DANGER:
 
         # Save to database for tracking
         entry_price = coin_data.get("price", 0)
-        analysis_id = _save_analysis(
+        analysis_id = await asyncio.to_thread(
+            _save_analysis,
             symbol, regime_data.get("regime", "UNKNOWN"),
             ai_bias, ai_grade, regime_data.get("confidence", 0),
             text, entry_price, coin_data, regime_data
@@ -732,9 +796,9 @@ async def state_poller():
 async def fetch_whale_positions() -> list:
     """Build active whale positions from recent alerts — OPEN without matching CLOSE."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 100})
-        data = resp.json()
+        data = await _cached_cg_get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 100})
+        if data is None:
+            return []
         if str(data.get("code")) != "0":
             return []
 
@@ -809,9 +873,9 @@ async def fetch_whale_positions() -> list:
 async def fetch_whale_alerts() -> list:
     """Fetch latest whale alerts from Hyperliquid via CoinGlass."""
     try:
-        http = await get_http()
-        resp = await http.get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 20})
-        data = resp.json()
+        data = await _cached_cg_get(f"{CG_BASE}/api/hyperliquid/whale-alert", params={"limit": 20})
+        if data is None:
+            return []
         if str(data.get("code")) != "0":
             return []
         alerts = []
@@ -838,7 +902,7 @@ async def fetch_whale_alerts() -> list:
 
 
 async def auto_push_loop():
-    """Every 30s, auto-push liq_cluster + cvd_history + taker + long_short + whales."""
+    """Every 45s, auto-push liq_cluster + cvd_history + taker + long_short + whales."""
     await asyncio.sleep(10)
     while True:
         try:
@@ -860,9 +924,11 @@ async def auto_push_loop():
                     except Exception:
                         dead.add(ws)
                 clients.difference_update(dead)
+                for ws in dead:
+                    client_coins.pop(ws, None)
 
             if not watched:
-                await asyncio.sleep(30)
+                await asyncio.sleep(45)
                 continue
 
             for symbol in watched:
@@ -892,7 +958,7 @@ async def auto_push_loop():
                         pass
         except Exception:
             pass
-        await asyncio.sleep(30)
+        await asyncio.sleep(45)
 
 
 async def outcome_checker_loop():
@@ -900,15 +966,14 @@ async def outcome_checker_loop():
     await asyncio.sleep(30)
     while True:
         try:
-            _check_outcomes()
+            await asyncio.to_thread(_check_outcomes)
         except Exception:
             pass
         await asyncio.sleep(60)
 
 
-@app.get("/api/ai-history")
-async def ai_history(symbol: str = None, limit: int = 20):
-    """Get AI analysis history with outcomes."""
+def _query_ai_history(symbol: str = None, limit: int = 20) -> list:
+    """Query AI analysis history (sync, run via to_thread)."""
     con = sqlite3.connect(str(_AI_DB))
     con.row_factory = sqlite3.Row
     if symbol:
@@ -922,13 +987,19 @@ async def ai_history(symbol: str = None, limit: int = 20):
             (limit,)
         ).fetchall()
     con.close()
-    return JSONResponse([dict(r) for r in rows])
+    return [dict(r) for r in rows]
+
+@app.get("/api/ai-history")
+async def ai_history(symbol: str = None, limit: int = 20):
+    """Get AI analysis history with outcomes."""
+    result = await asyncio.to_thread(_query_ai_history, symbol, limit)
+    return JSONResponse(result)
 
 
 @app.get("/api/ai-stats")
 async def ai_stats_endpoint(symbol: str = None):
     """Get AI win/loss stats per symbol per regime."""
-    stats = _get_ai_stats(symbol)
+    stats = await asyncio.to_thread(_get_ai_stats, symbol)
     # Calculate overall
     total = sum(s["total"] for s in stats)
     wins = sum(s["wins"] for s in stats)
@@ -940,11 +1011,32 @@ async def ai_stats_endpoint(symbol: str = None):
     })
 
 
+_logger = logging.getLogger("tg-dashboard")
+
+def _task_done_callback(task: asyncio.Task):
+    """Log exceptions from background tasks instead of silently swallowing them."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        _logger.error(f"Background task {task.get_name()} crashed: {exc}", exc_info=exc)
+
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(state_poller())
-    asyncio.create_task(auto_push_loop())
-    asyncio.create_task(outcome_checker_loop())
+    for coro, name in [
+        (state_poller(), "state_poller"),
+        (auto_push_loop(), "auto_push_loop"),
+        (outcome_checker_loop(), "outcome_checker"),
+    ]:
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(_task_done_callback)
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    global _http
+    if _http and not _http.is_closed:
+        await _http.aclose()
 
 
 # ── Signal Lifecycle Proxy ────────────────────────────

@@ -180,7 +180,7 @@ class TeleglasPro:
         self.rest_poller = CoinGlassRestPoller(
             api_key=coinglass_config.get('api_key', ''),
             symbols=rest_symbols,
-            poll_interval=market_context_config.get('poll_interval', 120),
+            poll_interval=market_context_config.get('poll_interval', 300),
             request_delay=0.25,
             on_oi_data=self._on_oi_data,
             on_funding_data=self._on_funding_data,
@@ -190,6 +190,7 @@ class TeleglasPro:
             on_orderbook_data=self._on_orderbook_data if market_context_config.get('orderbook_enabled', True) else None,
             on_funding_per_exchange_data=self._on_funding_per_exchange_data,
             on_price_data=self._on_price_data if market_context_config.get('price_enabled', True) else None,
+            rate_limit_per_minute=market_context_config.get('rate_limit_per_minute', 90),
         )
 
         # Signal outcome tracker (with DB callback for persistence)
@@ -1349,10 +1350,10 @@ class TeleglasPro:
                             await self.alert_queue.mark_processed(success=True)
                             self.stats['alerts_sent'] += 1
                         else:
+                            # Mark task_done BEFORE retry to keep queue accounting correct
+                            await self.alert_queue.mark_processed(success=False)
                             retried = await self.alert_queue.retry(queued_alert)
                             if not retried:
-                                # Max retries exhausted — mark as failed so queue doesn't hang
-                                await self.alert_queue.mark_processed(success=False)
                                 self.logger.warning(f"Alert dropped after {queued_alert.max_retries} retries")
                     else:
                         # No Telegram - just log

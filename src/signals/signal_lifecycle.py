@@ -190,8 +190,11 @@ class SignalLifecycleManager:
 
             if current is None or not current.is_alive:
                 # No active primary — this becomes primary
-                if current and current.is_alive:
-                    self._invalidate(current, STATUS_EXPIRED, "expired_by_time")
+                # Archive stale primary to history if it exists
+                if current and not current.is_alive:
+                    # Only archive if not already in history
+                    if current not in coin["history"]:
+                        coin["history"].append(current)
                 coin["primary"] = ms
             else:
                 # There's an active primary — evaluate supersede
@@ -248,7 +251,9 @@ class SignalLifecycleManager:
         symbol = ms.symbol
         self._ensure_coin(symbol)
         history = self._coins[symbol]["history"]
-        history.append(ms)
+        # Prevent duplicate entries in history
+        if ms not in history:
+            history.append(ms)
 
     # ── Periodic tick — update all states ───────────────────────────
 

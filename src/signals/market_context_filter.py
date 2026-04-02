@@ -195,27 +195,31 @@ class MarketContextFilter:
         """Build human-readable filter reason."""
         parts = []
 
-        rate_pct = context.current_funding_rate * 100
-        if context.funding_alignment == "FAVORABLE":
+        rate = getattr(context, 'current_funding_rate', 0) or 0
+        rate_pct = rate * 100
+        funding_align = getattr(context, 'funding_alignment', 'NEUTRAL')
+        if funding_align == "FAVORABLE":
             parts.append(
                 f"Funding {rate_pct:+.4f}% favors {direction} "
                 f"(counter-side crowded)"
             )
-        elif context.funding_alignment == "CAUTION":
+        elif funding_align == "CAUTION":
             parts.append(
                 f"Funding {rate_pct:+.4f}% suggests {direction} side crowded"
             )
         else:
             parts.append(f"Funding {rate_pct:+.4f}% neutral")
 
-        if context.oi_alignment == "CONFIRMATION":
-            parts.append(f"OI +{context.oi_change_1h_pct:.1f}% 1h (building)")
-        elif context.oi_alignment == "WEAK":
-            parts.append(f"OI {context.oi_change_1h_pct:.1f}% 1h (closing)")
-        elif context.oi_alignment == "SQUEEZE_RISK":
-            parts.append(f"OI +{context.oi_change_1h_pct:.1f}% 1h (squeeze risk)")
+        oi_chg = getattr(context, 'oi_change_1h_pct', 0) or 0
+        oi_align = getattr(context, 'oi_alignment', 'NEUTRAL')
+        if oi_align == "CONFIRMATION":
+            parts.append(f"OI +{oi_chg:.1f}% 1h (building)")
+        elif oi_align == "WEAK":
+            parts.append(f"OI {oi_chg:.1f}% 1h (closing)")
+        elif oi_align == "SQUEEZE_RISK":
+            parts.append(f"OI +{oi_chg:.1f}% 1h (squeeze risk)")
         else:
-            parts.append(f"OI {context.oi_change_1h_pct:+.1f}% 1h (stable)")
+            parts.append(f"OI {oi_chg:+.1f}% 1h (stable)")
 
         # CVD info
         cvd_align = getattr(context, 'cvd_alignment', 'NEUTRAL')
