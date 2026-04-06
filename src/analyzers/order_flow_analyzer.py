@@ -265,12 +265,12 @@ class OrderFlowAnalyzer:
         Returns:
             "ACCUMULATION", "DISTRIBUTION", or None
         """
-        # Check for accumulation
-        if buy_ratio >= self.accumulation_ratio and large_buys >= 3:
+        # Check for accumulation — tightened: need 70%+ buy ratio and 5+ whale orders
+        if buy_ratio >= 0.70 and large_buys >= 5:
             return "ACCUMULATION"
-        
-        # Check for distribution
-        if buy_ratio <= self.distribution_ratio and large_sells >= 3:
+
+        # Check for distribution — tightened: need 30%- buy ratio and 5+ whale orders
+        if buy_ratio <= 0.30 and large_sells >= 5:
             return "DISTRIBUTION"
         
         # No clear signal

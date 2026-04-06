@@ -169,6 +169,16 @@ class FundingPerExchange:
 
 
 @dataclass
+class LongShortSnapshot:
+    """Global long/short account ratio snapshot"""
+    symbol: str
+    long_pct: float          # Long account percentage (e.g., 62.5)
+    short_pct: float         # Short account percentage (e.g., 37.5)
+    crowded_side: str        # "LONG" if long_pct > 60, "SHORT" if short_pct > 60, "BALANCED"
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
 class PriceSnapshot:
     """Current price, 24h change, and volume"""
     symbol: str
@@ -213,6 +223,7 @@ class CoinGlassRestPoller:
         on_orderbook_data: Optional[Callable] = None,
         on_funding_per_exchange_data: Optional[Callable] = None,
         on_price_data: Optional[Callable] = None,
+        on_long_short_data: Optional[Callable] = None,
         rate_limit_per_minute: int = 90,
     ):
         """
@@ -248,6 +259,7 @@ class CoinGlassRestPoller:
         self.on_orderbook_data = on_orderbook_data
         self.on_funding_per_exchange_data = on_funding_per_exchange_data
         self.on_price_data = on_price_data
+        self.on_long_short_data = on_long_short_data
         self.logger = setup_logger("RestPoller", "INFO")
         self._session: Optional[aiohttp.ClientSession] = None
         self._rate_limiter = RateLimiter(
@@ -445,6 +457,11 @@ class CoinGlassRestPoller:
                 price = await self._fetch_price(symbol)
                 if price and self.on_price_data:
                     await self.on_price_data(price)
+                await asyncio.sleep(self.request_delay / 2)
+
+                ls = await self._fetch_long_short(symbol)
+                if ls and self.on_long_short_data:
+                    await self.on_long_short_data(ls)
 
         tasks = [asyncio.create_task(_fetch_symbol(s)) for s in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -513,6 +530,12 @@ class CoinGlassRestPoller:
                 if price and self.on_price_data:
                     await self.on_price_data(price)
 
+                await asyncio.sleep(self.request_delay / 2)
+
+                ls = await self._fetch_long_short(symbol)
+                if ls and self.on_long_short_data:
+                    await self.on_long_short_data(ls)
+
         # Skip fast_symbols in main poll — they're handled by fast poller
         fast_set = set(self.fast_symbols) if self.fast_symbols else set()
         poll_symbols = [s for s in self.symbols if s not in fast_set]
@@ -530,12 +553,12 @@ class CoinGlassRestPoller:
         """
         Fetch aggregated Open Interest history for a symbol.
 
-        Uses 1h interval, last 2 candles to get current OI and change.
-        Response: {"data": [{"time": ms, "open": "...", "high": "...", "low": "...", "close": "..."}, ...]}
+        Uses 5m interval, last 7 candles (35 min) for granular OI spike detection.
+        Change % is calculated between oldest and newest candle in the window.
         """
         try:
             url = f"{self.BASE_URL}/api/futures/open-interest/aggregated-history"
-            params = {"symbol": symbol, "interval": "1h", "limit": 2}
+            params = {"symbol": symbol, "interval": "5m", "limit": 7}
             data = await self._rate_limited_get(url, params)
             if data is None:
                 return None
@@ -550,16 +573,15 @@ class CoinGlassRestPoller:
             if not candles:
                 return None
 
-            # Latest candle is current, previous candle for change calculation
             latest = candles[-1]
-            previous = candles[-2] if len(candles) >= 2 else latest
+            previous = candles[0]  # ~30 min ago
 
             current_oi = float(latest.get("close", 0))
             previous_oi = float(previous.get("close", 0))
-            oi_high = float(latest.get("high", 0))
-            oi_low = float(latest.get("low", 0))
+            oi_high = max(float(c.get("high", 0)) for c in candles)
+            oi_low = min(float(c.get("low", 0)) for c in candles if float(c.get("low", 0)) > 0)
 
-            # Calculate change percentage
+            # Change % over the full 30m window
             change_pct = 0.0
             if previous_oi > 0:
                 change_pct = (current_oi - previous_oi) / previous_oi * 100
@@ -1000,6 +1022,54 @@ class CoinGlassRestPoller:
         except Exception as e:
             self._stats["errors"] += 1
             self.logger.error(f"Price fetch error for {symbol}: {e}")
+            return None
+
+    async def _fetch_long_short(self, symbol: str) -> Optional[LongShortSnapshot]:
+        """
+        Fetch global long/short account ratio from CoinGlass.
+
+        Uses 5m interval, latest candle. Returns crowded side if >60% one direction.
+        """
+        try:
+            url = f"{self.BASE_URL}/api/futures/global-long-short-account-ratio/history"
+            params = {
+                "symbol": self._to_pair(symbol),
+                "exchange": "Binance",
+                "interval": "5m",
+                "limit": 1,
+            }
+            data = await self._rate_limited_get(url, params)
+            if data is None:
+                return None
+
+            if str(data.get("code", "")) != "0":
+                return None
+
+            candles = data.get("data", [])
+            if not candles:
+                return None
+
+            latest = candles[-1]
+            long_pct = float(latest.get("global_account_long_percent", 50))
+            short_pct = float(latest.get("global_account_short_percent", 50))
+
+            if long_pct >= 60:
+                crowded = "LONG"
+            elif short_pct >= 60:
+                crowded = "SHORT"
+            else:
+                crowded = "BALANCED"
+
+            self._stats["long_short_fetches"] = self._stats.get("long_short_fetches", 0) + 1
+            return LongShortSnapshot(
+                symbol=symbol,
+                long_pct=long_pct,
+                short_pct=short_pct,
+                crowded_side=crowded,
+            )
+        except Exception as e:
+            self._stats["errors"] += 1
+            self.logger.error(f"L/S ratio fetch error for {symbol}: {e}")
             return None
 
     def update_symbols(self, symbols: List[str]):

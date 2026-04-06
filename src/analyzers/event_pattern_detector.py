@@ -158,7 +158,7 @@ class EventPatternDetector:
         else:
             return self.large_order_threshold * 0.2  # $2K for small coins
 
-    async def detect_whale_accumulation_window(self, symbol: str, min_large_orders: int = 5) -> Optional[EventSignal]:
+    async def detect_whale_accumulation_window(self, symbol: str, min_large_orders: int = 8) -> Optional[EventSignal]:
         """
         Detect whale accumulation OR distribution window.
 
@@ -201,16 +201,16 @@ class EventPatternDetector:
 
             buy_ratio = large_buys / total_large
 
-            # Detect accumulation (majority buys)
-            if buy_ratio >= 0.6:
+            # Detect accumulation (majority buys — tightened to 70%)
+            if buy_ratio >= 0.7:
                 dominant_ratio = buy_ratio
                 event_type = "WHALE_ACCUMULATION"
                 description = (
                     f"Whale accumulation window: {large_buys} large buy orders "
                     f"vs {large_sells} sells in 5 minutes"
                 )
-            # Detect distribution (majority sells)
-            elif buy_ratio <= 0.4:
+            # Detect distribution (majority sells — tightened to 30%)
+            elif buy_ratio <= 0.3:
                 dominant_ratio = 1.0 - buy_ratio  # sell ratio
                 event_type = "WHALE_DISTRIBUTION"
                 description = (

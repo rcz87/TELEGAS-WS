@@ -30,9 +30,9 @@ thresholds:
 
 # Signal Settings
 signals:
-  min_confidence: 60.0           # Lowered from 70 — tier-based thresholds + CVD VETO handle quality
-  max_signals_per_hour: 10       # Rate limit (quality over quantity)
-  cooldown_minutes: 15           # Cooldown between same signals
+  min_confidence: 72.0           # Raised from 60 — quality over quantity
+  max_signals_per_hour: 8        # Rate limit (quality over quantity)
+  cooldown_minutes: 20           # Cooldown between same signals
 
 # Signal Lifecycle (dashboard primary signal card)
 signal_lifecycle:
@@ -57,9 +57,9 @@ alerts:
   max_retries: 3                 # Retry attempts on failure
   
   # Alert priorities
-  urgent_threshold: 85           # Confidence for URGENT
-  watch_threshold: 75            # Confidence for WATCH
-  info_threshold: 60             # Confidence for INFO (matches min_confidence)
+  urgent_threshold: 90           # Confidence for URGENT
+  watch_threshold: 80            # Confidence for WATCH
+  info_threshold: 72             # Confidence for INFO (matches min_confidence)
 
 # Buffer Settings
 buffers:
@@ -311,7 +311,7 @@ watchlist:
 fast_poll:
   enabled: true
   interval: 60                   # Seconds between fast polls (1 minute)
-  symbols:                       # Top 10 coins for fast polling
+  symbols:                       # Top 10 coins — full data every 60s
     - BTC
     - ETH
     - SOL
@@ -320,14 +320,17 @@ fast_poll:
     - DOGE
     - SUI
     - AVAX
+    - ADA
+    - LINK
+    - AVAX
     - LINK
     - ADA
 
 # Market Context (OI + Funding Rate from CoinGlass REST API)
 market_context:
   enabled: true
-  poll_interval: 300             # Seconds between REST API polls (5 minutes)
-  rate_limit_per_minute: 90      # Max CoinGlass API calls/min (leave room for MCP/dashboard)
+  poll_interval: 600             # Seconds between REST API polls (5 minutes)
+  rate_limit_per_minute: 110     # Max CoinGlass API calls/min (leave room for MCP/dashboard)
   max_snapshots: 72              # Rolling buffer size per symbol (6 hours at 5-min)
   filter_mode: "normal"          # "strict" = only FAVORABLE, "normal" = block UNFAVORABLE, "permissive" = pass all
   confidence_adjust: true        # Adjust confidence based on market context

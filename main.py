@@ -170,6 +170,7 @@ class TeleglasPro:
         self.market_context_buffer = MarketContextBuffer(
             max_snapshots=market_context_config.get('max_snapshots', 72)
         )
+        self.stop_hunt_detector.market_context_buffer = self.market_context_buffer
         self.market_context_filter = MarketContextFilter(
             market_context_buffer=self.market_context_buffer,
             mode=market_context_config.get('filter_mode', 'normal'),
@@ -195,6 +196,7 @@ class TeleglasPro:
             on_orderbook_data=self._on_orderbook_data if market_context_config.get('orderbook_enabled', True) else None,
             on_funding_per_exchange_data=self._on_funding_per_exchange_data,
             on_price_data=self._on_price_data if market_context_config.get('price_enabled', True) else None,
+            on_long_short_data=self._on_long_short_data,
             rate_limit_per_minute=market_context_config.get('rate_limit_per_minute', 90),
         )
 
@@ -668,6 +670,10 @@ class TeleglasPro:
             f"Price {snapshot.symbol}: ${snapshot.price:,.2f} "
             f"({snapshot.change_24h_pct:+.1f}% 24h)"
         )
+
+    async def _on_long_short_data(self, snapshot):
+        """Callback: store long/short ratio snapshot in buffer."""
+        self.market_context_buffer.add_long_short_snapshot(snapshot)
 
     async def _on_signal_outcome(self, tracked, pnl_pct: float):
         """Callback: save signal outcome to database + feature table."""

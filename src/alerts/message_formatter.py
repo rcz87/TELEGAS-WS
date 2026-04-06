@@ -115,14 +115,29 @@ class MessageFormatter:
 
         if sig_type == "STOP_HUNT":
             sh = metadata.get('stop_hunt', {})
-            vol = sh.get('total_volume', 0)
             direction = sh.get('direction', 'UNKNOWN')
-            absorption = sh.get('absorption_volume', 0)
-            dir_pct = sh.get('directional_percentage', 0) * 100
-            liq_count = sh.get('liquidation_count', 0)
-            lines = [f"\U0001f514 Trigger: STOP HUNT | {direction}"]
-            lines.append(f"Liquidasi: {self._fmt_large_usd(vol)} ({liq_count} events, {dir_pct:.0f}% one-sided)")
-            lines.append(f"Absorpsi : {self._fmt_large_usd(absorption)}" + (" \u2705" if absorption > 0 else " \u274c"))
+            oi_spike = sh.get('oi_spike_pct', sh.get('directional_percentage', 0) * 100)
+            crowded = sh.get('crowded_side', 'N/A')
+            crowding_reason = sh.get('crowding_reason', '')
+            conditions = sh.get('conditions_met', 0)
+            long_pct = sh.get('long_pct', 50)
+            short_pct = sh.get('short_pct', 50)
+            cvd_ok = sh.get('cvd_aligned', False)
+            oi_usd = sh.get('absorption_volume', 0)
+
+            sweep_dir = "BAWAH (hunt longs)" if direction == "SHORT_HUNT" else "ATAS (hunt shorts)"
+            prepare = "LONG setelah sweep" if direction == "SHORT_HUNT" else "SHORT setelah sweep"
+
+            lines = ["\U0001f534\U0001f534\U0001f534 *PRE-HUNT SCANNER* \U0001f534\U0001f534\U0001f534"]
+            lines.append(f"\u2550\u2550\u2550 SETUP BUILDING \u2014 {conditions}/3 \u2550\u2550\u2550")
+            lines.append(f"\U0001f4c8 OI Spike : {oi_spike:+.2f}% ({self._fmt_large_usd(oi_usd)} masuk)")
+            lines.append(f"\U0001f465 Crowding : {crowding_reason or 'balanced'}")
+            lines.append(f"\U0001f4ca L/S Ratio: {long_pct:.0f}%L / {short_pct:.0f}%S")
+            lines.append(f"\U0001f501 CVD Align: {'\u2705 selaras' if cvd_ok else '\u274c belum'}")
+            lines.append(f"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550")
+            lines.append(f"\U0001f3af Prediksi : sweep ke {sweep_dir}")
+            lines.append(f"\u27a1\ufe0f Prepare  : *{prepare}*")
+            lines.append(f"\n\U0001f50d _Cek heatmap CoinGlass untuk konfirmasi cluster_")
             return "\n".join(lines)
 
         elif sig_type in ("ACCUMULATION", "DISTRIBUTION"):

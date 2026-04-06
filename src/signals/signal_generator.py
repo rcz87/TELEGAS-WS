@@ -304,7 +304,15 @@ class SignalGenerator:
                 'liquidation_count': stop_hunt_signal.liquidation_count,
                 'price_zone': stop_hunt_signal.price_zone,
                 'absorption_volume': stop_hunt_signal.absorption_volume,
-                'directional_pct': stop_hunt_signal.directional_percentage
+                'directional_pct': stop_hunt_signal.directional_percentage,
+                'oi_spike_pct': getattr(stop_hunt_signal, 'oi_spike_pct', 0),
+                'crowded_side': getattr(stop_hunt_signal, 'crowded_side', 'BALANCED'),
+                'crowding_reason': getattr(stop_hunt_signal, 'crowding_reason', ''),
+                'funding_rate': getattr(stop_hunt_signal, 'funding_rate', 0),
+                'long_pct': getattr(stop_hunt_signal, 'long_pct', 50),
+                'short_pct': getattr(stop_hunt_signal, 'short_pct', 50),
+                'cvd_aligned': getattr(stop_hunt_signal, 'cvd_aligned', False),
+                'conditions_met': getattr(stop_hunt_signal, 'conditions_met', 0),
             }
         
         if order_flow_signal:

@@ -65,6 +65,11 @@ class MarketContext:
     orderbook_ask_vol: float = 0.0
     orderbook_dominant: str = "UNKNOWN"
 
+    # Long/Short ratio
+    long_pct: float = 50.0
+    short_pct: float = 50.0
+    crowded_side: str = "BALANCED"
+
     # Per-exchange funding rates
     funding_per_exchange: dict = field(default_factory=dict)
 
@@ -99,6 +104,7 @@ class MarketContextBuffer:
         self._whale_positions: Dict[str, list] = {}  # symbol -> list of WhaleAlert
         self._orderbook_buffers: Dict[str, deque] = {}
         self._funding_per_exchange: Dict[str, object] = {}  # symbol -> latest FundingPerExchange
+        self._long_short_buffers: Dict[str, deque] = {}
         self._price_buffers: Dict[str, deque] = {}
         self._lock = threading.Lock()
         self.logger = setup_logger("MarketContextBuffer", "INFO")
@@ -245,6 +251,19 @@ class MarketContextBuffer:
             buf = list(self._price_buffers.get(symbol, deque()))
             return buf[-limit:] if buf else []
 
+    def add_long_short_snapshot(self, snapshot):
+        """Add long/short ratio snapshot."""
+        with self._lock:
+            if snapshot.symbol not in self._long_short_buffers:
+                self._long_short_buffers[snapshot.symbol] = deque(maxlen=self.max_snapshots)
+            self._long_short_buffers[snapshot.symbol].append(snapshot)
+
+    def get_latest_long_short(self, symbol: str):
+        """Get most recent long/short ratio for symbol."""
+        with self._lock:
+            buf = self._long_short_buffers.get(symbol, deque())
+            return buf[-1] if buf else None
+
     def get_spot_cvd_history(self, symbol: str, n: int = 6) -> list:
         """Get last N spot CVD snapshots for symbol."""
         with self._lock:
@@ -328,6 +347,12 @@ class MarketContextBuffer:
         price_change_24h = price_snap.change_24h_pct if price_snap else 0.0
         volume_24h = price_snap.volume_24h if price_snap else 0.0
 
+        # Long/Short ratio
+        ls = self.get_latest_long_short(symbol)
+        long_pct = ls.long_pct if ls else 50.0
+        short_pct = ls.short_pct if ls else 50.0
+        crowded_side = ls.crowded_side if ls else "BALANCED"
+
         # Assessments
         funding_alignment = self._assess_funding_alignment(
             current_funding, signal_direction
@@ -368,6 +393,9 @@ class MarketContextBuffer:
             orderbook_bid_vol=ob_bid_vol,
             orderbook_ask_vol=ob_ask_vol,
             orderbook_dominant=ob_dominant,
+            long_pct=long_pct,
+            short_pct=short_pct,
+            crowded_side=crowded_side,
             funding_per_exchange=fpe_rates,
             current_price=current_price,
             price_change_24h_pct=price_change_24h,
@@ -538,6 +566,7 @@ class MarketContextBuffer:
             whale_symbols = len(self._whale_positions)
             total_whales = sum(len(v) for v in self._whale_positions.values())
             total_orderbook = sum(len(b) for b in self._orderbook_buffers.values())
+            total_long_short = sum(len(b) for b in self._long_short_buffers.values())
             total_price = sum(len(b) for b in self._price_buffers.values())
             fpe_symbols = len(self._funding_per_exchange)
         return {
@@ -551,6 +580,7 @@ class MarketContextBuffer:
             "whale_symbols_tracked": whale_symbols,
             "total_whale_positions": total_whales,
             "total_orderbook_snapshots": total_orderbook,
+            "total_long_short_snapshots": total_long_short,
             "total_price_snapshots": total_price,
             "funding_per_exchange_symbols": fpe_symbols,
         }

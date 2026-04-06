@@ -1,412 +1,332 @@
-# Stop Hunt Detector - Detect Liquidation Cascades
-# Production-ready stop hunt detection with absorption analysis
+# Stop Hunt Detector - Pre-Hunt Liquidity Scanner
+# Detects OI spike + crowding + CVD alignment BEFORE the sweep happens
 
 """
-Stop Hunt Detector Module
+Stop Hunt Detector Module — v2 (Pre-Hunt Scanner)
 
-Responsibilities:
-- Detect liquidation cascades ($2M+ in 30s)
-- Identify direction (SHORT_HUNT or LONG_HUNT)
-- Detect whale absorption
-- Calculate confidence score
-- Emit StopHuntSignal
+Replaces the old post-cascade detector with a predictive scanner that alerts
+BEFORE the stop hunt happens, giving time to prepare.
 
-Algorithm:
-1. Monitor liquidations in 30s windows
-2. Detect cascade when volume > $2M
-3. Determine majority direction (long/short)
-4. Check for absorption (large opposite orders)
-5. Calculate confidence based on volume & absorption
+Conditions (2 of 3 mandatory for alert):
+1. OI SPIKE — OI increased ≥1% in last 30 minutes (new money entering)
+2. CROWDING — L/S ratio >60% one side OR funding rate extreme (>0.03%)
+3. CVD ALIGNED — SpotCVD and FuturesCVD not conflicting
+
+Direction logic:
+- Crowded LONG + OI spike → expect SHORT sweep (hunt longs) → prepare LONG after sweep
+- Crowded SHORT + OI spike → expect LONG squeeze (hunt shorts) → prepare SHORT after sweep
+- No clear crowding → use CVD direction as bias
 """
 
-from typing import Dict, Optional, List, Tuple
+from typing import Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import asyncio
 
 from ..utils.logger import setup_logger
 
+
 @dataclass
 class StopHuntSignal:
-    """Stop hunt signal data structure"""
+    """Pre-hunt setup signal data structure.
+
+    Kept as StopHuntSignal for backward compatibility with signal_generator
+    and message_formatter.
+    """
     symbol: str
-    total_volume: float
-    direction: str  # SHORT_HUNT or LONG_HUNT
-    price_zone: Tuple[float, float]
-    absorption_detected: bool
-    absorption_volume: float
+    total_volume: float          # OI USD value (for context)
+    direction: str               # SHORT_HUNT or LONG_HUNT (who will get hunted)
+    price_zone: Tuple[float, float]  # (current_price, 0) — no zone pre-hunt
+    absorption_detected: bool    # True if CVD confirms (aligned)
+    absorption_volume: float     # OI change in USD (absolute)
     confidence: float
     timestamp: str
-    liquidation_count: int
-    directional_percentage: float
+    liquidation_count: int       # Crowding strength (long_pct or short_pct as int)
+    directional_percentage: float  # OI change % (e.g., 0.023 = 2.3%)
+    # New fields for pre-hunt metadata
+    oi_spike_pct: float = 0.0
+    crowded_side: str = "BALANCED"
+    crowding_reason: str = ""
+    funding_rate: float = 0.0
+    long_pct: float = 50.0
+    short_pct: float = 50.0
+    cvd_aligned: bool = False
+    conditions_met: int = 0
+
 
 class StopHuntDetector:
     """
-    Production-ready stop hunt detector
+    Pre-Hunt Liquidity Scanner
 
-    Detects liquidation cascades and whale absorption patterns
-    to identify safe entry points after stop hunts.
+    Scans for conditions that typically precede a stop hunt:
+    1. OI spike (new positions = new stops being placed)
+    2. Crowding (one side dominant = stops concentrated)
+    3. CVD alignment (flow direction confirms setup)
 
-    Features:
-    - Dynamic tiered thresholds (BTC $2M, mid-caps $200K, small coins $50K)
-    - Direction identification
-    - Whale absorption detection
-    - Confidence scoring
-    - All-coin monitoring support
+    Alerts BEFORE the sweep so the trader can prepare and watch the heatmap.
     """
 
-    def __init__(self, buffer_manager, threshold: float = 2000000, absorption_threshold: float = 100000, absorption_min_order_usd: float = 5000, monitoring_config: dict = None):
-        """
-        Initialize stop hunt detector
-
-        Args:
-            buffer_manager: BufferManager instance
-            threshold: Default liquidation volume for cascade (default $2M, used for tier1)
-            absorption_threshold: Default absorption volume (default $100K, used for tier1)
-            absorption_min_order_usd: Minimum single order size for absorption (default $5K)
-            monitoring_config: Dynamic monitoring config with per-tier thresholds
-        """
+    def __init__(self, buffer_manager, threshold: float = 2000000,
+                 absorption_threshold: float = 100000,
+                 absorption_min_order_usd: float = 5000,
+                 monitoring_config: dict = None):
         self.buffer_manager = buffer_manager
-        self.threshold = threshold
-        self.absorption_threshold = absorption_threshold
-        self.absorption_min_order_usd = absorption_min_order_usd
+        self.market_context_buffer = None  # Set by main.py
+        self.logger = setup_logger("StopHuntDetector", "INFO")
+        self._detections = 0
 
-        # 4-Tier thresholds for dynamic all-coin monitoring
+        # Tier thresholds for OI spike significance
         monitoring = monitoring_config or {}
         self._tier1_symbols = set(monitoring.get('tier1_symbols', ['BTCUSDT', 'ETHUSDT']))
         self._tier2_symbols = set(monitoring.get('tier2_symbols', []))
         self._tier3_symbols = set(monitoring.get('tier3_symbols', []))
-        self._tier1_cascade = monitoring.get('tier1_cascade', threshold)
-        self._tier2_cascade = monitoring.get('tier2_cascade', 200_000)
-        self._tier3_cascade = monitoring.get('tier3_cascade', 50_000)
-        self._tier4_cascade = monitoring.get('tier4_cascade', 10_000)
-        self._tier1_absorption = monitoring.get('tier1_absorption', absorption_threshold)
-        self._tier2_absorption = monitoring.get('tier2_absorption', 20_000)
-        self._tier3_absorption = monitoring.get('tier3_absorption', 5_000)
-        self._tier4_absorption = monitoring.get('tier4_absorption', 1_000)
 
-        self.logger = setup_logger("StopHuntDetector", "INFO")
-        self._detections = 0
+        # OI spike thresholds per tier (minimum % for VALID)
+        self._oi_thresholds = {
+            1: 0.8,   # BTC/ETH: 0.8% is significant
+            2: 1.0,   # Large alts: 1.0%
+            3: 1.5,   # Mid alts: 1.5%
+            4: 2.0,   # Small: 2.0%
+        }
+
+        # Cooldown tracking
+        self._last_alert: dict = {}  # symbol -> timestamp
+        monitoring = monitoring_config or {}
+        self._tier1_cooldown = monitoring.get('tier1_cooldown', 7200)   # 2h
+        self._tier2_cooldown = monitoring.get('tier2_cooldown', 3600)   # 1h
+        self._tier3_cooldown = monitoring.get('tier3_cooldown', 2700)   # 45m
+        self._tier4_cooldown = monitoring.get('tier4_cooldown', 1800)   # 30m
+
+    def _get_tier(self, symbol: str) -> int:
+        if symbol in self._tier1_symbols:
+            return 1
+        elif symbol in self._tier2_symbols:
+            return 2
+        elif symbol in self._tier3_symbols:
+            return 3
+        return 4
+
+    def _get_cooldown(self, symbol: str) -> int:
+        tier = self._get_tier(symbol)
+        return {1: self._tier1_cooldown, 2: self._tier2_cooldown,
+                3: self._tier3_cooldown, 4: self._tier4_cooldown}[tier]
 
     def get_threshold_for_symbol(self, symbol: str) -> tuple:
-        """
-        Get dynamic cascade and absorption thresholds based on coin tier.
+        """Backward compat — returns (oi_threshold_pct, 0) for this scanner."""
+        tier = self._get_tier(symbol)
+        return (self._oi_thresholds.get(tier, 2.0), 0)
 
-        Tier 1 (BTC, ETH): Highest thresholds - most liquid
-        Tier 2 (mid-caps): Medium thresholds
-        Tier 3 (small coins): Lowest thresholds - small cascade = significant
-
-        Args:
-            symbol: Trading pair symbol
-
-        Returns:
-            (cascade_threshold, absorption_threshold) tuple
+    async def analyze(self, symbol: str, cascade_window: int = 30,
+                      absorption_window: int = 30) -> Optional[StopHuntSignal]:
         """
-        if symbol in self._tier1_symbols:
-            return (self._tier1_cascade, self._tier1_absorption)
-        elif symbol in self._tier2_symbols:
-            return (self._tier2_cascade, self._tier2_absorption)
-        elif symbol in self._tier3_symbols:
-            return (self._tier3_cascade, self._tier3_absorption)
-        else:
-            return (self._tier4_cascade, self._tier4_absorption)
-        
-    async def analyze(self, symbol: str, cascade_window: int = 30, absorption_window: int = 30) -> Optional[StopHuntSignal]:
-        """
-        Analyze liquidations for stop hunt pattern
-        
-        Algorithm:
-        1. Get liquidations in last 30 seconds
-        2. Check if total volume > threshold ($2M)
-        3. Determine direction (SHORT_HUNT or LONG_HUNT)
-        4. Check for absorption in next 30s
-        5. Calculate confidence score
-        6. Return signal if confident enough
-        
-        Args:
-            symbol: Trading pair (e.g., "BTCUSDT")
-            cascade_window: Time window for cascade detection (seconds)
-            absorption_window: Time window for absorption detection (seconds)
-            
-        Returns:
-            StopHuntSignal if detected, None otherwise
+        Scan for pre-hunt setup conditions.
+
+        Returns StopHuntSignal if 2+ conditions are met, None otherwise.
         """
         try:
-            # Step 1: Get recent liquidations
-            liquidations = self.buffer_manager.get_liquidations(symbol, time_window=cascade_window)
-            
-            if not liquidations:
-                return None
-            
-            # Step 2: Calculate total volume with dynamic per-coin threshold
-            total_volume = self.calculate_total_volume(liquidations)
-
-            cascade_threshold, absorption_threshold = self.get_threshold_for_symbol(symbol)
-
-            if total_volume < cascade_threshold:
-                self.logger.debug(
-                    f"{symbol}: Volume ${total_volume:,.0f} below threshold ${cascade_threshold:,.0f}"
-                )
+            if not self.market_context_buffer:
                 return None
 
-            # Step 3: Determine direction
-            direction, directional_pct = self.determine_direction(liquidations)
+            # Cooldown check
+            now = datetime.now(timezone.utc).timestamp()
+            last = self._last_alert.get(symbol, 0)
+            cooldown = self._get_cooldown(symbol)
+            if now - last < cooldown:
+                return None
 
-            # Step 4: Get price zone
-            price_zone = self.get_price_zone(liquidations)
+            # Strip USDT suffix for buffer lookups
+            base = symbol.replace("USDT", "")
 
-            # Step 5: Check for absorption
-            # No sleep needed - buffer is updated synchronously
-            absorption_volume = await self.check_absorption(symbol, direction, absorption_window)
-            absorption_detected = absorption_volume >= absorption_threshold
-            
-            # Step 6: Calculate confidence (relative to coin's threshold)
-            confidence = self.calculate_confidence(
-                total_volume=total_volume,
-                absorption_volume=absorption_volume,
-                directional_pct=directional_pct,
-                liquidation_count=len(liquidations),
-                cascade_threshold=cascade_threshold
+            # ── Condition 1: OI Spike ──
+            oi_snap = self.market_context_buffer.get_latest_oi(base)
+            if not oi_snap:
+                return None
+
+            oi_change_pct = oi_snap.oi_change_pct  # Already 30m window from 5m candles
+            tier = self._get_tier(symbol)
+            oi_threshold = self._oi_thresholds.get(tier, 2.0)
+
+            oi_spike = abs(oi_change_pct) >= oi_threshold
+            oi_strong = abs(oi_change_pct) >= oi_threshold * 2
+
+            if not oi_spike:
+                return None  # OI is mandatory — no spike, no alert
+
+            # ── Condition 2: Crowding ──
+            ls = self.market_context_buffer.get_latest_long_short(base)
+            funding = self.market_context_buffer.get_latest_funding(base)
+
+            long_pct = ls.long_pct if ls else 50.0
+            short_pct = ls.short_pct if ls else 50.0
+            fr = funding.current_rate if funding else 0.0
+
+            crowded_side = "BALANCED"
+            crowding_reason = ""
+            crowding_met = False
+
+            # L/S ratio crowding
+            if long_pct >= 60:
+                crowded_side = "LONG"
+                crowding_reason = f"L/S {long_pct:.1f}% long"
+                crowding_met = True
+            elif short_pct >= 60:
+                crowded_side = "SHORT"
+                crowding_reason = f"L/S {short_pct:.1f}% short"
+                crowding_met = True
+
+            # Funding rate extreme (supplements or replaces L/S)
+            if abs(fr) >= 0.0003:  # ≥0.03%
+                fr_side = "LONG" if fr > 0 else "SHORT"
+                if not crowding_met:
+                    crowded_side = fr_side
+                    crowding_reason = f"FR {fr*100:+.4f}% extreme"
+                    crowding_met = True
+                elif crowded_side == fr_side:
+                    crowding_reason += f" + FR {fr*100:+.4f}%"
+                # If FR opposes L/S crowding, mixed signal — still count as crowded
+
+            # ── Condition 3: CVD Alignment ──
+            spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base)
+            fut_cvd = self.market_context_buffer.get_latest_futures_cvd(base)
+
+            spot_dir = spot_cvd.cvd_direction if spot_cvd else "UNKNOWN"
+            fut_dir = fut_cvd.cvd_direction if fut_cvd else "UNKNOWN"
+
+            cvd_aligned = False
+            if spot_dir != "UNKNOWN" and fut_dir != "UNKNOWN":
+                # Both going same direction = aligned
+                if spot_dir == fut_dir and spot_dir != "FLAT":
+                    cvd_aligned = True
+                # Spot moving, futures flat = partial (still count)
+                elif spot_dir != "FLAT" and fut_dir == "FLAT":
+                    cvd_aligned = True
+
+            # ── Decision: need OI spike (mandatory) + at least 1 more ──
+            conditions = sum([oi_spike, crowding_met, cvd_aligned])
+
+            if conditions < 2:
+                return None
+
+            # ── Direction ──
+            # Crowded LONG → expect SHORT sweep → prepare LONG after
+            # Crowded SHORT → expect LONG squeeze → prepare SHORT after
+            if crowded_side == "LONG":
+                direction = "SHORT_HUNT"  # Longs will get hunted
+            elif crowded_side == "SHORT":
+                direction = "LONG_HUNT"   # Shorts will get hunted
+            else:
+                # No clear crowding — use CVD as bias
+                if spot_dir == "RISING":
+                    direction = "LONG_HUNT"  # Momentum up, shorts at risk
+                elif spot_dir == "FALLING":
+                    direction = "SHORT_HUNT"  # Momentum down, longs at risk
+                else:
+                    direction = "SHORT_HUNT"  # Default conservative
+
+            # ── Confidence ──
+            confidence = self._calculate_confidence(
+                oi_change_pct=oi_change_pct,
+                oi_threshold=oi_threshold,
+                crowding_met=crowding_met,
+                crowded_pct=max(long_pct, short_pct),
+                cvd_aligned=cvd_aligned,
+                fr=fr,
+                conditions=conditions,
             )
-            
-            # Create signal
+
+            # Get price for context
+            price_snap = self.market_context_buffer.get_latest_price(base)
+            current_price = price_snap.price if price_snap else 0.0
+            oi_change_usd = abs(oi_change_pct / 100 * oi_snap.current_oi_usd)
+
             signal = StopHuntSignal(
                 symbol=symbol,
-                total_volume=total_volume,
+                total_volume=oi_snap.current_oi_usd,
                 direction=direction,
-                price_zone=price_zone,
-                absorption_detected=absorption_detected,
-                absorption_volume=absorption_volume,
+                price_zone=(current_price, 0.0),
+                absorption_detected=cvd_aligned,
+                absorption_volume=oi_change_usd,
                 confidence=confidence,
                 timestamp=datetime.now(timezone.utc).isoformat(),
-                liquidation_count=len(liquidations),
-                directional_percentage=directional_pct
+                liquidation_count=int(max(long_pct, short_pct)),
+                directional_percentage=abs(oi_change_pct) / 100,
+                oi_spike_pct=oi_change_pct,
+                crowded_side=crowded_side,
+                crowding_reason=crowding_reason,
+                funding_rate=fr,
+                long_pct=long_pct,
+                short_pct=short_pct,
+                cvd_aligned=cvd_aligned,
+                conditions_met=conditions,
             )
-            
+
+            self._last_alert[symbol] = now
             self._detections += 1
             self.logger.info(
-                f"🎯 Stop hunt detected: {symbol} - {direction} - "
-                f"${total_volume:,.0f} liquidated - Confidence: {confidence:.0f}%"
+                f"🎯 Pre-hunt setup: {symbol} {direction} — "
+                f"OI {oi_change_pct:+.2f}% | {crowding_reason or 'no crowd'} | "
+                f"CVD {'aligned' if cvd_aligned else 'not aligned'} | "
+                f"{conditions}/3 conditions | conf={confidence:.0f}%"
             )
-            
+
             return signal
-            
+
         except Exception as e:
             self.logger.error(f"Analysis failed for {symbol}: {e}")
             return None
-    
-    def calculate_total_volume(self, liquidations: List[dict]) -> float:
-        """
-        Calculate total liquidation volume
-        
-        Args:
-            liquidations: List of liquidation events
-            
-        Returns:
-            Total volume in USD
-        """
-        total = 0.0
-        for liq in liquidations:
-            vol = liq.get("vol", 0)
-            total += float(vol)
-        return total
-    
-    def determine_direction(self, liquidations: List[dict]) -> Tuple[str, float]:
-        """
-        Determine if SHORT_HUNT or LONG_HUNT
-        
-        Side values:
-        - 1 = Long liquidation (longs got stopped = SHORT_HUNT by whales)
-        - 2 = Short liquidation (shorts got stopped = LONG_HUNT by whales)
-        
-        Args:
-            liquidations: List of liquidation events
-            
-        Returns:
-            (direction, percentage) e.g., ("SHORT_HUNT", 0.78)
-        """
-        long_liq_count = 0
-        short_liq_count = 0
-        long_liq_volume = 0.0
-        short_liq_volume = 0.0
-        
-        for liq in liquidations:
-            side = int(liq.get("side", 0))
-            vol = float(liq.get("vol", 0))
 
-            if side == 1:  # Long liquidation
-                long_liq_count += 1
-                long_liq_volume += vol
-            elif side == 2:  # Short liquidation
-                short_liq_count += 1
-                short_liq_volume += vol
-        
-        total_volume = long_liq_volume + short_liq_volume
-        
-        if total_volume == 0:
-            return "UNKNOWN", 0.5
-        
-        # If majority are long liquidations, it's a SHORT_HUNT (whales hunting longs)
-        # If majority are short liquidations, it's a LONG_HUNT (whales hunting shorts)
-        if long_liq_volume > short_liq_volume:
-            direction = "SHORT_HUNT"
-            percentage = long_liq_volume / total_volume
-        else:
-            direction = "LONG_HUNT"
-            percentage = short_liq_volume / total_volume
-        
-        return direction, percentage
-    
-    async def check_absorption(self, symbol: str, hunt_direction: str, time_window: int = 30) -> float:
-        """
-        Check for whale absorption after stop hunt
-        
-        After SHORT_HUNT (longs liquidated), look for large BUY orders
-        After LONG_HUNT (shorts liquidated), look for large SELL orders
-        
-        Args:
-            symbol: Trading pair
-            hunt_direction: "SHORT_HUNT" or "LONG_HUNT"
-            time_window: Time window to check for absorption
-            
-        Returns:
-            Total absorption volume in USD
-        """
-        try:
-            # Get recent trades
-            trades = self.buffer_manager.get_trades(symbol, time_window=time_window)
-            
-            if not trades:
-                return 0.0
-            
-            absorption_volume = 0.0
-            
-            # After SHORT_HUNT, look for BUY orders (side=2)
-            # After LONG_HUNT, look for SELL orders (side=1)
-            target_side = 2 if hunt_direction == "SHORT_HUNT" else 1
-            
-            for trade in trades:
-                side = int(trade.get("side", 0))
-                vol = float(trade.get("vol", 0))
-
-                # Only count large orders (>absorption_min_order_usd)
-                if side == target_side and vol > self.absorption_min_order_usd:
-                    absorption_volume += vol
-            
-            return absorption_volume
-            
-        except Exception as e:
-            self.logger.error(f"Absorption check failed: {e}")
-            return 0.0
-    
-    def get_price_zone(self, liquidations: List[dict]) -> Tuple[float, float]:
-        """
-        Get price zone where liquidations occurred
-        
-        Args:
-            liquidations: List of liquidation events
-            
-        Returns:
-            (min_price, max_price) tuple
-        """
-        prices = []
-        for liq in liquidations:
-            price = float(liq.get("price", 0))
-            if price > 0:
-                prices.append(price)
-        
-        if not prices:
-            return (0.0, 0.0)
-        
-        return (min(prices), max(prices))
-    
-    def calculate_confidence(
+    def _calculate_confidence(
         self,
-        total_volume: float,
-        absorption_volume: float,
-        directional_pct: float,
-        liquidation_count: int,
-        cascade_threshold: float = 2_000_000
+        oi_change_pct: float,
+        oi_threshold: float,
+        crowding_met: bool,
+        crowded_pct: float,
+        cvd_aligned: bool,
+        fr: float,
+        conditions: int,
     ) -> float:
         """
-        Calculate confidence score (0-99%)
+        Calculate confidence score for pre-hunt setup.
 
-        Uses volume ratios relative to threshold so small coins
-        get fair scoring (e.g. $100K on a $50K-threshold coin
-        scores the same as $4M on a $2M-threshold coin).
-
-        Factors:
-        - Total liquidation volume relative to threshold
-        - Absorption volume relative to cascade
-        - Directional clarity (one-sided = more confident)
-        - Number of liquidations (more = more reliable)
-
-        Args:
-            total_volume: Total liquidation volume
-            absorption_volume: Whale absorption volume
-            directional_pct: Percentage in main direction (0.0-1.0)
-            liquidation_count: Number of liquidation events
-            cascade_threshold: The threshold used for this coin tier
-
-        Returns:
-            Confidence score (0-99%)
+        Base 50% + bonuses from each condition's strength.
         """
-        confidence = 50.0  # Base
+        confidence = 50.0
 
-        # Factor 1: Volume relative to threshold (works for any coin size)
-        volume_ratio = total_volume / max(cascade_threshold, 1)
-        if volume_ratio > 5.0:
+        # OI spike strength (10-25 points)
+        oi_ratio = abs(oi_change_pct) / max(oi_threshold, 0.1)
+        if oi_ratio >= 3.0:
             confidence += 25
-        elif volume_ratio > 2.5:
+        elif oi_ratio >= 2.0:
             confidence += 20
-        elif volume_ratio > 1.5:
+        elif oi_ratio >= 1.5:
             confidence += 15
-        elif volume_ratio >= 1.0:
+        else:
             confidence += 10
 
-        # Factor 2: Absorption relative to total volume
-        if total_volume > 0:
-            absorption_ratio = absorption_volume / total_volume
-            if absorption_ratio > 0.3:
-                confidence += 25
-            elif absorption_ratio > 0.2:
+        # Crowding strength (0-20 points)
+        if crowding_met:
+            if crowded_pct >= 70:
                 confidence += 20
-            elif absorption_ratio > 0.1:
+            elif crowded_pct >= 65:
                 confidence += 15
-            elif absorption_ratio > 0.05:
+            elif crowded_pct >= 60:
                 confidence += 10
-            elif absorption_ratio > 0:
-                confidence += 0  # minimal absorption, no bonus
-            else:
-                confidence -= 15  # ZERO absorption = penalty
-        else:
-            confidence -= 15  # no volume data = penalty
 
-        # Factor 3: Directional clarity
-        if directional_pct > 0.9:  # >90% one direction
-            confidence += 15
-        elif directional_pct > 0.8:  # >80%
-            confidence += 12
-        elif directional_pct > 0.7:  # >70%
-            confidence += 8
+            # FR extreme bonus
+            if abs(fr) >= 0.0005:  # ≥0.05%
+                confidence += 5
 
-        # Factor 4: Liquidation count
-        if liquidation_count > 100:
+        # CVD alignment (0-10 points)
+        if cvd_aligned:
+            confidence += 10
+
+        # 3/3 conditions bonus
+        if conditions == 3:
             confidence += 5
-        elif liquidation_count > 50:
-            confidence += 3
 
-        # Cap at 99%, and hard cap at 70% if no absorption
-        no_absorption = (absorption_volume <= 0)
-        final = min(confidence, 99.0)
-        if no_absorption:
-            final = min(final, 70.0)  # no whale absorption = cannot pass min_confidence 78%
-        return final
-    
+        return min(confidence, 99.0)
+
     def get_stats(self) -> dict:
-        """Get detector statistics"""
         return {
             "total_detections": self._detections,
-            "threshold": self.threshold,
-            "absorption_threshold": self.absorption_threshold
+            "mode": "pre-hunt-scanner",
         }
