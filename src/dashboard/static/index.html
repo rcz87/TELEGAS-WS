@@ -753,10 +753,12 @@ const CVD_TIER={BTC:20000000,ETH:5000000,SOL:2000000,AVAX:500000,SUI:500000,HYPE
 function getTvSymbol(coin){return'BINANCE:'+coin+'USDT.P';}
 
 let ws=null,reconnectTimer=null,lastState=null,tvWidget=null;
+let lastDataTime=0; // timestamp of last WS data received
 let rightCoin=localStorage.getItem('tg_right_coin')||'SOL';
 let ws3Data={};
 let posFilter='all';
 let whalePositions=[];
+let aiCache=JSON.parse(localStorage.getItem('tg_ai_cache')||'{}'); // {coin: {html, ts, trackBar}}
 
 // ── Formatters ───────────────────────────
 function fp(p){if(!p)return'N/A';if(p>=1000)return'$'+p.toLocaleString('en',{maximumFractionDigits:0});if(p>=1)return'$'+p.toFixed(2);if(p>=.01)return'$'+p.toFixed(4);return'$'+p.toFixed(6);}
@@ -1467,7 +1469,7 @@ function detectRegime(d){
   let acc=0,dist=0,liq=0,sqz=0,rng=0;
   const spotDir=d.spot_cvd_dir||'FLAT',futDir=d.fut_cvd_dir||'FLAT';
   const spotSlope=Math.abs(d.spot_cvd_slope||0),futSlope=Math.abs(d.fut_cvd_slope||0);
-  const oiChg=d.oi_change_1h||0,oiInterp=d.oi_interp||'';
+  const oiChgRaw=d.oi_change_1h||0,oiInterp=d.oi_interp||'';
   const fr=d.funding_rate||0,frAbs=Math.abs(fr);
   const chg24=Math.abs(d.change_24h||0);
   const obBid=d.ob_bid||0,obAsk=d.ob_ask||0,obTotal=obBid+obAsk||1;
@@ -1476,6 +1478,11 @@ function detectRegime(d){
   const takerBuyPct=takerBuy/takerTotal;
   const longS=d.long_score||0,shortS=d.short_score||0;
   const cvdConflict=spotDir!==futDir&&spotDir!=='FLAT'&&futDir!=='FLAT';
+
+  // OI tier normalization: small coins need bigger % to matter
+  const regOiUsd=d.oi_usd||0;
+  const regOiMult=regOiUsd>=10e9?1.0:regOiUsd>=1e9?0.8:regOiUsd>=200e6?0.6:0.4;
+  const oiChg=oiChgRaw*regOiMult;
 
   // ── Price structure ──
   if(chg24<1.5){acc+=15;rng+=15;}                // sideways/compression
@@ -1595,20 +1602,23 @@ function computeAdaptiveScore(d,regime,regimeConf){
     else if(spotDir==='FALLING')shortRaw+=W.spotcvd*(0.5+Math.min(Math.abs(spotSlope),0.5));
   }
 
-  // ── OI scoring ──
+  // ── OI scoring (tier-normalized) ──
+  // Tier 1 (BTC/ETH): 0.3% is significant. Tier 4 (small): needs 1%+ to matter.
+  const oiUsd=d.oi_usd||0;
+  const oiTierMult=oiUsd>=10e9?1.0:oiUsd>=1e9?0.8:oiUsd>=200e6?0.6:0.4; // scale down significance for small OI
+  const oiNorm=oiChg*oiTierMult; // normalized OI change
   const oiW=W.oi||0;
   if(oiW){
     if(regime==='LIQUIDATION'){
-      // In liquidation, OI drop = continuation signal
-      if(oiChg<-1)shortRaw+=oiW*0.8;
-      else if(oiChg<-0.3)shortRaw+=oiW*0.4;
-      else if(oiChg>0.5)longRaw+=oiW*0.3; // stabilizing
+      if(oiNorm<-1)shortRaw+=oiW*0.8;
+      else if(oiNorm<-0.3)shortRaw+=oiW*0.4;
+      else if(oiNorm>0.5)longRaw+=oiW*0.3;
     } else if(regime==='ACCUMULATION'){
-      if(oiChg>0.3&&oiChg<2)longRaw+=oiW*0.7;
-      else if(oiChg>2)longRaw+=oiW*0.3; // too fast, penalize
+      if(oiNorm>0.3&&oiNorm<2)longRaw+=oiW*0.7;
+      else if(oiNorm>2)longRaw+=oiW*0.3;
     } else {
-      if(oiChg>0.5)longRaw+=oiW*0.5;
-      else if(oiChg<-0.5)shortRaw+=oiW*0.5;
+      if(oiNorm>0.5)longRaw+=oiW*0.5;
+      else if(oiNorm<-0.5)shortRaw+=oiW*0.5;
     }
     if(oiInterp==='MOMENTUM VALID')longRaw+=oiW*0.2;
     if(oiInterp==='SHORT ADDING')longRaw+=oiW*0.15; // squeeze fuel
@@ -1819,6 +1829,14 @@ async function runAiAnalysis(){
   if(!key&&!_aiServerKey){statusEl.textContent='masukkan API key dulu';statusEl.style.color='var(--red)';return;}
   if(!lastState||!lastState.coins||!lastState.coins[rightCoin]){statusEl.textContent='no data';return;}
 
+  // Block on stale data (>30s since last WS update)
+  const staleAge=Date.now()-lastDataTime;
+  if(staleAge>30000){
+    statusEl.textContent=`Data stale (${Math.round(staleAge/1000)}s) — tunggu reconnect`;
+    statusEl.style.color='var(--red)';
+    return;
+  }
+
   // Save key if entered manually
   if(key)localStorage.setItem('tg_ai_key',key);
 
@@ -1915,12 +1933,19 @@ async function runAiAnalysis(){
         </div>`;
       }
 
-      resultEl.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">
+      const fullHtml=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">
         <span style="color:var(--blue);font-weight:bold;font-size:10px">MONEY FLOW ANALYSIS — ${rightCoin}</span>
         <span style="color:var(--text4);font-size:9px">${ts} | ${data.model||''}</span>
       </div>${html}${trackBar}`;
+      resultEl.innerHTML=fullHtml;
       resultEl.style.display='block';
       statusEl.textContent='saved #'+(data.tracking_id||'');statusEl.style.color='var(--green)';
+
+      // Cache to localStorage (max 10 coins, 2h expiry)
+      aiCache[rightCoin]={html:fullHtml,ts:Date.now()};
+      const cacheKeys=Object.keys(aiCache);
+      if(cacheKeys.length>10){delete aiCache[cacheKeys.sort((a,b)=>aiCache[a].ts-aiCache[b].ts)[0]];}
+      localStorage.setItem('tg_ai_cache',JSON.stringify(aiCache));
     }
   } catch(e){
     statusEl.textContent='Error: '+e.message;statusEl.style.color='var(--red)';
@@ -2200,6 +2225,7 @@ function updateRegimeCard(d){
 // ── Main Render ──────────────────────────
 function render(state){
   lastState=state;
+  lastDataTime=Date.now();
   document.getElementById('ts').textContent=state.timestamp||'--';
   document.getElementById('btc-ticker').innerHTML=buildBtcTicker(state);
 
@@ -2226,11 +2252,18 @@ function selectCoin(coin){
   document.querySelectorAll('.pill').forEach(b=>b.classList.toggle('active',b.dataset.coin===rightCoin));
   document.getElementById('coin-search').value='';
   document.getElementById('coin-dropdown').classList.remove('open');
-  // Clear previous AI analysis
+  // Restore cached AI analysis or clear
   const aiResult=document.getElementById('ai-result');
-  if(aiResult){aiResult.style.display='none';aiResult.innerHTML='';}
   const aiStatus=document.getElementById('ai-status');
-  if(aiStatus)aiStatus.textContent='';
+  const cached=aiCache[coin];
+  if(cached&&(Date.now()-cached.ts)<7200000){
+    aiResult.innerHTML=cached.html;aiResult.style.display='block';
+    const cacheAge=Math.round((Date.now()-cached.ts)/60000);
+    aiStatus.textContent=`cached (${cacheAge}m ago)`;aiStatus.style.color='var(--text4)';
+  } else {
+    if(aiResult){aiResult.style.display='none';aiResult.innerHTML='';}
+    if(aiStatus)aiStatus.textContent='';
+  }
   if(lastState)render(lastState);
   updateChart(rightCoin);
   requestCoinData(rightCoin);
@@ -2305,6 +2338,39 @@ function connect(){
 }
 setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping');},15000);
 connect();
+
+// ── Data Age Ticker (updates header every 1s) ──
+setInterval(()=>{
+  if(!lastDataTime)return;
+  const ageSec=Math.round((Date.now()-lastDataTime)/1000);
+  const tsEl=document.getElementById('ts');
+  const statusEl=document.getElementById('conn-status');
+  if(ageSec<=5){
+    tsEl.textContent=(lastState?lastState.timestamp:'--')+' (live)';
+  }else if(ageSec<=30){
+    tsEl.textContent=(lastState?lastState.timestamp:'--')+` (${ageSec}s ago)`;
+  }else{
+    tsEl.textContent=(lastState?lastState.timestamp:'--')+` (${ageSec}s ago ⚠)`;
+    if(statusEl.textContent==='LIVE'){statusEl.textContent='STALE';statusEl.className='status reconnecting';}
+  }
+  // Signal freshness client-side countdown
+  if(sigData.primary&&sigData.primary.remaining_seconds>0){
+    sigData.primary.remaining_seconds=Math.max(0,sigData.primary.remaining_seconds-1);
+    sigData.primary.age_seconds=(sigData.primary.age_seconds||0)+1;
+    if(sigData.primary.freshness>0)sigData.primary.freshness=Math.max(0,sigData.primary.freshness-0.001);
+    const fillEl=document.querySelector('.sig-expiry-fill');
+    if(fillEl){
+      const f=sigData.primary.freshness||0;
+      fillEl.style.width=Math.round(f*100)+'%';
+      fillEl.className='sig-expiry-fill '+(f>0.6?'fresh':f>0.3?'aging':'dying');
+    }
+    const ageEls=document.querySelectorAll('.sig-meta .val');
+    if(ageEls.length>=4){
+      ageEls[2].textContent=fmtAge(sigData.primary.age_seconds);
+      ageEls[3].textContent=fmtAge(sigData.primary.remaining_seconds);
+    }
+  }
+},1000);
 
 // ── Signal Lifecycle Panel ─────────────────
 let sigData={primary:null,recent:[],active:[]};
