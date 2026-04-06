@@ -2080,19 +2080,29 @@ function updateMoneyFlow(d){
   document.getElementById('mf-market-label').textContent=`MARKET: ${mktState} (${mktConf})`;
   document.getElementById('mf-market-evidence').textContent=mktEvidence;
 
-  // Entry Checklist (Rule 15)
+  // Entry Checklist (Rule 15) — 9 checks: regime, CVD, Δ60m, OI, taker, market, flow, FR, session
+  const regOk=lastRegime&&lastRegime!=='RANGE';
+  const regReady=lastRegimeResult&&(lastRegimeResult.status==='READY'||lastRegimeResult.status==='WATCH');
+  const chgSameDir=(mfSpotChg>0&&mfFutChg>0)||(mfSpotChg<0&&mfFutChg<0);
+  const chgOppose=(mfSpotChg>0&&mfFutChg<0)||(mfSpotChg<0&&mfFutChg>0);
   const checks=[
+    {label:'REGIME',pass:regOk&&regReady,warn:regOk&&!regReady,desc:lastRegime+' — '+(lastRegimeResult?lastRegimeResult.status:'N/A')},
     {label:'CVD ALIGNED',pass:cvdAlign.includes('ALIGNED')&&!cvdAlign.includes('WEAK'),warn:cvdAlign.includes('WEAK'),desc:'SpotCVD+FutCVD direction+change aligned'},
-    {label:'OI CONFIRM',pass:oiChg>0.2||matrix==='MOMENTUM',desc:'OI supporting'},
-    {label:'TAKER CONFIRM',pass:Math.abs(tNet)>0&&((tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')),desc:'Taker matches flow'},
-    {label:'NOT CHOP',pass:!mktState.includes('CHOP')&&!mktState.includes('TRANSITION'),desc:'Market state tradeable'},
-    {label:'FLOW OK',pass:!flowState.includes('CHOPPY')&&!flowState.includes('EXHAUSTED'),desc:'Flow has direction'},
-    {label:'FR SAFE',pass:Math.abs(fr)<0.05,warn:Math.abs(fr)>=0.03,desc:'Funding not extreme'},
-    {label:'SESSION',pass:sessionLabel==='NY'||sessionLabel==='LONDON',warn:sessionLabel==='ASIA',desc:'Volume session'},
+    {label:'Δ60m SYNC',pass:chgSameDir,warn:!chgSameDir&&!chgOppose,desc:chgSameDir?'Spot+Fut change same direction':chgOppose?'Spot vs Fut change opposing':'One side flat'},
+    {label:'OI CONFIRM',pass:oiChg>0.3||matrix==='MOMENTUM',warn:oiChg>0&&oiChg<=0.3,desc:'OI '+(oiChg>0?'+':'')+oiChg.toFixed(2)+'% — '+(oiChg>0.3?'supporting':'weak')},
+    {label:'TAKER',pass:Math.abs(tNet)>0&&((tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')),warn:Math.abs(tNet)>0&&tPct>40&&tPct<60,desc:'Taker net '+fmtM(tNet)+' — '+(tPct>60?'buy dominant':tPct<40?'sell dominant':'balanced')},
+    {label:'MARKET',pass:!mktState.includes('CHOP')&&!mktState.includes('TRANSITION')&&mktConf!=='LOW',warn:mktConf==='LOW',desc:mktState+' ('+mktConf+')'},
+    {label:'FLOW',pass:!flowState.includes('CHOPPY')&&!flowState.includes('EXHAUSTED')&&!flowState.includes('FLAT'),warn:flowState.includes('DECEL'),desc:flowState},
+    {label:'FR SAFE',pass:Math.abs(fr)<0.03,warn:Math.abs(fr)>=0.03&&Math.abs(fr)<0.05,desc:'FR '+fr.toFixed(4)+'% — '+(Math.abs(fr)<0.01?'normal':Math.abs(fr)<0.03?'elevated':'extreme')},
+    {label:'SESSION',pass:sessionLabel==='NY'||sessionLabel==='LONDON',warn:sessionLabel==='ASIA',desc:sessionLabel+' session'},
   ];
-  document.getElementById('mf-checklist').innerHTML=checks.map(c=>{
+  const passCount=checks.filter(c=>c.pass).length;
+  const warnCount=checks.filter(c=>c.warn&&!c.pass).length;
+  document.getElementById('mf-checklist').innerHTML=
+    `<span class="mf-check ${passCount>=7?'pass':passCount>=5?'warn':'fail'}" style="font-weight:bold" title="Minimum 7/9 for entry">${passCount}/${checks.length} PASS</span>`+
+    checks.map(c=>{
     const cls=c.pass?'pass':(c.warn?'warn':'fail');
-    return`<span class="mf-check ${cls}" title="${c.desc}">${c.pass?'✓':'✗'} ${c.label}</span>`;
+    return`<span class="mf-check ${cls}" title="${c.desc}">${c.pass?'✓':c.warn?'⚠':'✗'} ${c.label}</span>`;
   }).join('');
 
   // Funding State
@@ -2113,9 +2123,11 @@ function updateMoneyFlow(d){
 
 function fmtM(v){const a=Math.abs(v);if(a>=1e9)return'$'+(v/1e9).toFixed(2)+'B';if(a>=1e6)return'$'+(v/1e6).toFixed(2)+'M';if(a>=1e3)return'$'+(v/1e3).toFixed(1)+'K';return'$'+v.toFixed(0);}
 
+let lastRegime='RANGE',lastRegimeResult=null;
 function updateRegimeCard(d){
   const{regime,conf:regimeConf,scores}=detectRegime(d);
   const result=computeAdaptiveScore(d,regime,regimeConf);
+  lastRegime=regime;lastRegimeResult=result;
 
   // Card border color
   const card=document.getElementById('regime-card');
