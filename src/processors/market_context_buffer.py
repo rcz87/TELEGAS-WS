@@ -47,9 +47,11 @@ class MarketContext:
     spot_cvd_direction: str = "UNKNOWN"
     spot_cvd_slope: float = 0.0
     spot_cvd_latest: float = 0.0
+    spot_cvd_change: float = 0.0
     futures_cvd_direction: str = "UNKNOWN"
     futures_cvd_slope: float = 0.0
     futures_cvd_latest: float = 0.0
+    futures_cvd_change: float = 0.0
     cvd_alignment: str = "NEUTRAL"
 
     # Whale data
@@ -292,9 +294,11 @@ class MarketContextBuffer:
         spot_cvd_direction = spot_cvd.cvd_direction if spot_cvd else "UNKNOWN"
         spot_cvd_slope = spot_cvd.cvd_slope if spot_cvd else 0.0
         spot_cvd_latest = spot_cvd.cvd_latest if spot_cvd else 0.0
+        spot_cvd_change = spot_cvd.cvd_change if spot_cvd else 0.0
         futures_cvd_direction = futures_cvd.cvd_direction if futures_cvd else "UNKNOWN"
         futures_cvd_slope = futures_cvd.cvd_slope if futures_cvd else 0.0
         futures_cvd_latest = futures_cvd.cvd_latest if futures_cvd else 0.0
+        futures_cvd_change = futures_cvd.cvd_change if futures_cvd else 0.0
 
         # Whale data
         whale_positions = self.get_whale_positions(symbol, min_value_usd=1_000_000)
@@ -351,9 +355,11 @@ class MarketContextBuffer:
             spot_cvd_direction=spot_cvd_direction,
             spot_cvd_slope=spot_cvd_slope,
             spot_cvd_latest=spot_cvd_latest,
+            spot_cvd_change=spot_cvd_change,
             futures_cvd_direction=futures_cvd_direction,
             futures_cvd_slope=futures_cvd_slope,
             futures_cvd_latest=futures_cvd_latest,
+            futures_cvd_change=futures_cvd_change,
             cvd_alignment=cvd_alignment,
             whale_conflicting=whale_conflicting,
             whale_largest_value_usd=whale_largest_value,

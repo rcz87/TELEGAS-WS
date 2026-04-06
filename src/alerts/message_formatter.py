@@ -163,15 +163,15 @@ class MessageFormatter:
 
         if has_spot:
             spot_dir = ctx['spot_cvd_direction']
-            spot_slope = ctx.get('spot_cvd_slope', 0)
-            arrow = self._dir_arrow(spot_dir)
-            lines.append(f"SpotCVD  : {self._fmt_value(ctx.get('spot_cvd_latest', 0))} {arrow} slope:{self._fmt_value(spot_slope)}/5m")
+            chg = ctx.get('spot_cvd_change', 0)
+            chg_arrow = "\u25b2" if chg > 0 else "\u25bc" if chg < 0 else "\u2192"
+            lines.append(f"SpotCVD  : {self._fmt_value(ctx.get('spot_cvd_latest', 0))} | \u039460m: {chg_arrow}{self._fmt_value(chg)} | {spot_dir}")
 
         if has_fut:
             fut_dir = ctx['futures_cvd_direction']
-            fut_slope = ctx.get('futures_cvd_slope', 0)
-            arrow = self._dir_arrow(fut_dir)
-            lines.append(f"FutCVD   : {self._fmt_value(ctx.get('futures_cvd_latest', 0))} {arrow} slope:{self._fmt_value(fut_slope)}/5m")
+            chg = ctx.get('futures_cvd_change', 0)
+            chg_arrow = "\u25b2" if chg > 0 else "\u25bc" if chg < 0 else "\u2192"
+            lines.append(f"FutCVD   : {self._fmt_value(ctx.get('futures_cvd_latest', 0))} | \u039460m: {chg_arrow}{self._fmt_value(chg)} | {fut_dir}")
 
         # CVD alignment label
         cvd_align = ctx.get('cvd_alignment', 'NEUTRAL')

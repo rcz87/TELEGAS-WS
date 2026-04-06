@@ -125,6 +125,7 @@ class CVDSnapshot:
     market: str           # "spot" or "futures"
     cvd_values: list      # Last N CVD values (floats)
     cvd_latest: float     # Most recent value
+    cvd_change: float     # Net change over window: cvd_values[-1] - cvd_values[0]
     cvd_slope: float      # Linear regression slope (normalized)
     cvd_direction: str    # "RISING" / "FALLING" / "FLAT"
     taker_buy_vol: float = 0.0   # Sum of taker buy volume (last candle)
@@ -700,12 +701,16 @@ class CoinGlassRestPoller:
             slope_data = cvd_values[-10:]
             slope, direction = self._calculate_cvd_slope(slope_data)
 
+            # Net change over window
+            cvd_change = (cvd_values[-1] - cvd_values[0]) if len(cvd_values) >= 2 else 0.0
+
             self._stats["spot_cvd_fetches"] += 1
             return CVDSnapshot(
                 symbol=symbol,
                 market="spot",
                 cvd_values=cvd_values,
                 cvd_latest=cvd_values[-1] if cvd_values else 0.0,
+                cvd_change=cvd_change,
                 cvd_slope=slope,
                 cvd_direction=direction,
                 taker_buy_vol=tbv,
@@ -755,12 +760,16 @@ class CoinGlassRestPoller:
             slope_data = cvd_values[-10:]
             slope, direction = self._calculate_cvd_slope(slope_data)
 
+            # Net change over window
+            cvd_change = (cvd_values[-1] - cvd_values[0]) if len(cvd_values) >= 2 else 0.0
+
             self._stats["futures_cvd_fetches"] += 1
             return CVDSnapshot(
                 symbol=symbol,
                 market="futures",
                 cvd_values=cvd_values,
                 cvd_latest=cvd_values[-1] if cvd_values else 0.0,
+                cvd_change=cvd_change,
                 cvd_slope=slope,
                 cvd_direction=direction,
                 taker_buy_vol=tbv,

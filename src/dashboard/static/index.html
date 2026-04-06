@@ -287,8 +287,20 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 .ofi-col{background:var(--bg);border-radius:6px;padding:8px 10px;position:relative;overflow:hidden;}
 .ofi-col-label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px;}
 .ofi-col-val{font-size:18px;font-weight:bold;line-height:1.2;transition:color .4s ease;}
+.ofi-col-change{font-size:11px;color:var(--text3);margin-top:1px;line-height:1.2;}
+.ofi-col-change .chg-val{font-weight:bold;}
+.ofi-col-change .chg-pos{color:var(--green);}
+.ofi-col-change .chg-neg{color:var(--red);}
 .ofi-col-status{font-size:10px;font-weight:bold;margin-top:2px;}
 .ofi-col-bar{position:absolute;bottom:0;left:0;height:3px;border-radius:0 0 6px 6px;transition:width .6s ease-out, background .4s ease;}
+.ofi-interp{background:var(--bg);border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:11px;display:flex;gap:8px;align-items:center;}
+.ofi-interp-badge{font-weight:bold;font-size:10px;padding:2px 8px;border-radius:4px;white-space:nowrap;}
+.ofi-interp-badge.strong-long{background:rgba(52,211,153,0.2);color:var(--green);}
+.ofi-interp-badge.weak-long{background:rgba(251,191,36,0.2);color:var(--yellow);}
+.ofi-interp-badge.strong-short{background:rgba(248,113,113,0.2);color:var(--red);}
+.ofi-interp-badge.weak-short{background:rgba(251,191,36,0.2);color:var(--yellow);}
+.ofi-interp-badge.conflict{background:rgba(148,163,184,0.2);color:var(--text3);}
+.ofi-interp-desc{color:var(--text3);}
 
 .ofi-dom{margin-bottom:6px;}
 .ofi-dom-label{font-size:9px;color:var(--text4);margin-bottom:3px;display:flex;justify-content:space-between;}
@@ -524,15 +536,21 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
         <div class="ofi-col">
           <div class="ofi-col-label">SPOT CVD</div>
           <div class="ofi-col-val" id="ofi-spot-val">--</div>
+          <div class="ofi-col-change" id="ofi-spot-change"></div>
           <div class="ofi-col-status" id="ofi-spot-status">--</div>
           <div class="ofi-col-bar" id="ofi-spot-bar"></div>
         </div>
         <div class="ofi-col">
           <div class="ofi-col-label">FUTURES CVD</div>
           <div class="ofi-col-val" id="ofi-fut-val">--</div>
+          <div class="ofi-col-change" id="ofi-fut-change"></div>
           <div class="ofi-col-status" id="ofi-fut-status">--</div>
           <div class="ofi-col-bar" id="ofi-fut-bar"></div>
         </div>
+      </div>
+      <div class="ofi-interp" id="ofi-interp" style="display:none">
+        <span class="ofi-interp-badge" id="ofi-interp-badge">--</span>
+        <span class="ofi-interp-desc" id="ofi-interp-desc"></span>
       </div>
       <div class="ofi-dom">
         <div class="ofi-dom-label"><span>Dominance</span><span id="ofi-dom-who">--</span></div>
@@ -904,25 +922,63 @@ function updateFlowCard(d){
   else if(aligned&&spotDir==='FALLING'){alignEl.className='ofi-align bear';alignEl.textContent='ALIGNED BEARISH';}
   else{alignEl.className='ofi-align conflict';alignEl.textContent='DIVERGING';}
 
-  // 2. Spot CVD value + status + bar
+  // 2. Spot CVD value + change + status + bar
+  const spotChg=d.spot_cvd_change||0;
   const spotSt=_cvdStatus(spotDir,spotSlope);
   const spotValEl=document.getElementById('ofi-spot-val');
   spotValEl.textContent=fc(spotVal);spotValEl.style.color=spotColor;
+  const spotChgEl=document.getElementById('ofi-spot-change');
+  const spotChgArrow=spotChg>0?'\u25b2':spotChg<0?'\u25bc':'\u2192';
+  const spotChgCls=spotChg>0?'chg-pos':spotChg<0?'chg-neg':'';
+  spotChgEl.innerHTML=`\u039460m: <span class="chg-val ${spotChgCls}">${spotChgArrow}${fc(spotChg)}</span>`;
   const spotStEl=document.getElementById('ofi-spot-status');
   spotStEl.textContent=spotSt.t;spotStEl.className='ofi-col-status '+spotSt.c;
   const spotBar=document.getElementById('ofi-spot-bar');
   spotBar.style.width=Math.min(spotAbs/tier*100,100).toFixed(0)+'%';
   spotBar.style.background=spotColorHex;spotBar.style.opacity='0.5';
 
-  // 3. Futures CVD value + status + bar
+  // 3. Futures CVD value + change + status + bar
+  const futChg=d.fut_cvd_change||0;
   const futSt=_cvdStatus(futDir,futSlope);
   const futValEl=document.getElementById('ofi-fut-val');
   futValEl.textContent=fc(futVal);futValEl.style.color=futColor;
+  const futChgEl=document.getElementById('ofi-fut-change');
+  const futChgArrow=futChg>0?'\u25b2':futChg<0?'\u25bc':'\u2192';
+  const futChgCls=futChg>0?'chg-pos':futChg<0?'chg-neg':'';
+  futChgEl.innerHTML=`\u039460m: <span class="chg-val ${futChgCls}">${futChgArrow}${fc(futChg)}</span>`;
   const futStEl=document.getElementById('ofi-fut-status');
   futStEl.textContent=futSt.t;futStEl.className='ofi-col-status '+futSt.c;
   const futBar=document.getElementById('ofi-fut-bar');
   futBar.style.width=Math.min(futAbs/tier*100,100).toFixed(0)+'%';
   futBar.style.background=futColorHex;futBar.style.opacity='0.5';
+
+  // 3b. CVD Interpretation
+  const interpEl=document.getElementById('ofi-interp');
+  const interpBadge=document.getElementById('ofi-interp-badge');
+  const interpDesc=document.getElementById('ofi-interp-desc');
+  const spotChangeDir=spotChg>0?'pos':spotChg<0?'neg':'flat';
+  const futChangeDir=futChg>0?'pos':futChg<0?'neg':'flat';
+  let interpLabel='',interpCls='',interpText='';
+  if(spotChangeDir!=='flat'&&futChangeDir!=='flat'&&spotChangeDir!==futChangeDir){
+    interpLabel='CONFLICT';interpCls='conflict';interpText='Spot & Futures CVD opposing — no clear edge, wait';
+  } else if(spotVal>=0&&spotChg>0&&spotDir==='RISING'){
+    interpLabel='STRONG LONG';interpCls='strong-long';interpText='Level + Change + Trend all bullish';
+  } else if(spotVal>=0&&spotChg<0&&spotDir==='FALLING'){
+    interpLabel='WEAK LONG';interpCls='weak-long';interpText='Level still positive but draining — distribution risk';
+  } else if(spotVal<0&&spotChg<0&&spotDir==='FALLING'){
+    interpLabel='STRONG SHORT';interpCls='strong-short';interpText='Level + Change + Trend all bearish';
+  } else if(spotVal<0&&spotChg>0&&spotDir==='RISING'){
+    interpLabel='WEAK SHORT';interpCls='weak-short';interpText='Level negative but recovering — watch for reversal';
+  } else if(spotDir==='RISING'){
+    interpLabel='LEANING LONG';interpCls='weak-long';interpText='Trend rising, mixed signals on level/change';
+  } else if(spotDir==='FALLING'){
+    interpLabel='LEANING SHORT';interpCls='weak-short';interpText='Trend falling, mixed signals on level/change';
+  } else{
+    interpLabel='NEUTRAL';interpCls='conflict';interpText='No clear directional signal';
+  }
+  interpEl.style.display='flex';
+  interpBadge.textContent=interpLabel;interpBadge.className='ofi-interp-badge '+interpCls;
+  interpDesc.textContent=interpText;
 
   // 4. Dominance bar (smooth)
   const totalStr=spotAbs+futAbs||1;
