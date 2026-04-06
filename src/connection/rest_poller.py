@@ -236,6 +236,9 @@ class CoinGlassRestPoller:
         self.symbols = list(symbols)
         self.poll_interval = poll_interval
         self.request_delay = request_delay
+        self.fast_symbols: List[str] = []
+        self.fast_poll_interval: int = 60
+        self._on_fast_poll_done: Optional[Callable] = None
         self.on_oi_data = on_oi_data
         self.on_funding_data = on_funding_data
         self.on_spot_cvd_data = on_spot_cvd_data
@@ -363,6 +366,91 @@ class CoinGlassRestPoller:
                 await self._session.close()
             self.logger.info("REST Poller stopped")
 
+    async def start_fast_poll(self, shutdown_event: asyncio.Event):
+        """Fast polling loop for priority coins. Runs alongside main poll loop."""
+        if not self.fast_symbols:
+            return
+
+        self.logger.info(
+            f"Fast Poller started: {self.fast_symbols} every {self.fast_poll_interval}s"
+        )
+
+        # Wait for main session to be ready
+        for _ in range(30):
+            if self._session and not self._session.closed:
+                break
+            await asyncio.sleep(1)
+
+        while not shutdown_event.is_set():
+            try:
+                await self._poll_symbols(self.fast_symbols)
+                self.logger.debug(f"Fast poll done: {len(self.fast_symbols)} symbols")
+
+                # Notify caller (main.py) to write state immediately
+                if self._on_fast_poll_done:
+                    try:
+                        await self._on_fast_poll_done()
+                    except Exception as e:
+                        self.logger.error(f"Fast poll callback error: {e}")
+
+            except Exception as e:
+                self.logger.error(f"Fast poll error: {e}")
+
+            try:
+                await asyncio.wait_for(
+                    shutdown_event.wait(),
+                    timeout=self.fast_poll_interval,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+        self.logger.info("Fast Poller stopped")
+
+    async def _poll_symbols(self, symbols: List[str]):
+        """Poll all data types for a list of symbols."""
+        sem = asyncio.Semaphore(3)
+
+        # Global endpoints (whale, funding per exchange) only in main poll
+        all_funding_data = None
+
+        async def _fetch_symbol(symbol: str):
+            async with sem:
+                oi = await self._fetch_oi(symbol)
+                if oi and self.on_oi_data:
+                    await self.on_oi_data(oi)
+                await asyncio.sleep(self.request_delay / 2)
+
+                funding = await self._fetch_funding(symbol)
+                if funding and self.on_funding_data:
+                    await self.on_funding_data(funding)
+                await asyncio.sleep(self.request_delay / 2)
+
+                spot_cvd = await self._fetch_spot_cvd(symbol)
+                if spot_cvd and self.on_spot_cvd_data:
+                    await self.on_spot_cvd_data(spot_cvd)
+                await asyncio.sleep(self.request_delay / 2)
+
+                futures_cvd = await self._fetch_futures_cvd(symbol)
+                if futures_cvd and self.on_futures_cvd_data:
+                    await self.on_futures_cvd_data(futures_cvd)
+                await asyncio.sleep(self.request_delay / 2)
+
+                ob = await self._fetch_orderbook_delta(symbol)
+                if ob and self.on_orderbook_data:
+                    await self.on_orderbook_data(ob)
+                await asyncio.sleep(self.request_delay / 2)
+
+                price = await self._fetch_price(symbol)
+                if price and self.on_price_data:
+                    await self.on_price_data(price)
+
+        tasks = [asyncio.create_task(_fetch_symbol(s)) for s in symbols]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                self.logger.error(f"Fast poll error for {symbols[i]}: {result}")
+
     async def _poll_all(self):
         """Poll OI, funding, CVD, whale, orderbook, and price for all symbols.
 
@@ -424,8 +512,12 @@ class CoinGlassRestPoller:
                 if price and self.on_price_data:
                     await self.on_price_data(price)
 
+        # Skip fast_symbols in main poll — they're handled by fast poller
+        fast_set = set(self.fast_symbols) if self.fast_symbols else set()
+        poll_symbols = [s for s in self.symbols if s not in fast_set]
+
         # Launch all symbols concurrently (semaphore limits to 3 at a time)
-        tasks = [asyncio.create_task(_fetch_symbol(s)) for s in self.symbols]
+        tasks = [asyncio.create_task(_fetch_symbol(s)) for s in poll_symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Log any unexpected exceptions (individual fetch errors already handled)

@@ -307,6 +307,22 @@ watchlist:
   - XAG
   - PAXG
 
+# Fast Poll — priority coins polled every 60s for near-real-time dashboard
+fast_poll:
+  enabled: true
+  interval: 60                   # Seconds between fast polls (1 minute)
+  symbols:                       # Top 10 coins for fast polling
+    - BTC
+    - ETH
+    - SOL
+    - BNB
+    - XRP
+    - DOGE
+    - SUI
+    - AVAX
+    - LINK
+    - ADA
+
 # Market Context (OI + Funding Rate from CoinGlass REST API)
 market_context:
   enabled: true

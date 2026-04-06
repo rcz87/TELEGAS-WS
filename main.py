@@ -193,6 +193,15 @@ class TeleglasPro:
             rate_limit_per_minute=market_context_config.get('rate_limit_per_minute', 90),
         )
 
+        # Fast poll config — priority coins polled every 60s
+        fast_poll_config = config.get('fast_poll', {})
+        if fast_poll_config.get('enabled', False):
+            self.rest_poller.fast_symbols = [
+                s.strip().upper() for s in fast_poll_config.get('symbols', [])
+            ]
+            self.rest_poller.fast_poll_interval = fast_poll_config.get('interval', 60)
+            self.rest_poller._on_fast_poll_done = self._on_fast_poll_done
+
         # Signal outcome tracker (with DB callback for persistence)
         self.signal_tracker = SignalTracker(
             buffer_manager=self.buffer_manager,
@@ -593,6 +602,14 @@ class TeleglasPro:
                 f"🐋 Whale alert: {alert.symbol} {alert.direction} "
                 f"${alert.position_value_usd/1_000_000:.1f}M on Hyperliquid"
             )
+
+    async def _on_fast_poll_done(self):
+        """Callback: write state immediately after fast poll completes."""
+        try:
+            symbols = list(self.rest_poller.symbols)
+            self._write_live_state(symbols)
+        except Exception as e:
+            self.logger.error(f"Fast poll state write error: {e}")
 
     async def _on_orderbook_data(self, snapshot):
         """Callback: store orderbook delta in buffer."""
@@ -2085,7 +2102,13 @@ class TeleglasPro:
                 asyncio.create_task(self.rest_poller.start(shutdown_event)),
                 asyncio.create_task(self.proactive_scan_task()),
             ]
-            
+
+            # Start fast poller if configured
+            if self.rest_poller.fast_symbols:
+                tasks.append(
+                    asyncio.create_task(self.rest_poller.start_fast_poll(shutdown_event))
+                )
+
             self.logger.info("=" * 60)
             self.logger.info("✅ TELEGLAS Pro v4.0 - Running (ALL-COIN Monitoring)")
             self.logger.info("=" * 60)
