@@ -744,7 +744,8 @@ DATA INTEGRITY (NEVER VIOLATE):
 - If data shows 0, N/A, or "no history" → say "DATA UNAVAILABLE", do NOT fabricate.
 - Report CVD exactly as shown. Do NOT reinterpret.
 
-═══ OUTPUT FORMAT (follow EXACTLY) ═══
+═══ OUTPUT FORMAT (follow EXACTLY — RESPOND IN BAHASA INDONESIA) ═══
+IMPORTANT: Write your ENTIRE analysis in Bahasa Indonesia. All explanations, evidence, verdicts, and danger notes must be in Indonesian. Technical terms (SpotCVD, FutCVD, OI, etc.) may stay in English but all descriptions and reasoning MUST be in Indonesian.
 
 1. FLOW SNAPSHOT
 SpotCVD: [direction] [magnitude] [candle ratio if available]
