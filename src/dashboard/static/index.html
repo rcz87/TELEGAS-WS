@@ -1579,7 +1579,7 @@ function computeAdaptiveScore(d,regime,regimeConf){
     LIQUIDATION:{oi:30,cvd:25,taker:20,pos:15,liq:10,fr:5,ob:5},
     SQUEEZE:{pos:25,fr:20,futcvd:20,oi:15,liq:10,spotcvd:5,ob:5},
     RANGE:{conflict:30,oi:20,cvd:20,taker:10,liq:10,fr:5,ob:5}
-  }[regime]||W_RANGE;
+  }[regime]||{conflict:30,oi:20,cvd:20,taker:10,liq:10,fr:5,ob:5};
 
   let longRaw=0,shortRaw=0;
 
@@ -2175,9 +2175,6 @@ function updateRegimeCard(d){
     // If new regime differs from current, only switch if last 2 agree
     if(regime!==lastRegime&&!(last2[0]===regime&&last2[1]===regime)){
       regime=lastRegime; // hold current regime
-      // Recalculate with held regime
-      const result=computeAdaptiveScore(d,regime,regimeConf);
-      lastRegime=regime;lastRegimeResult=result;
     }
   }
 
@@ -2251,15 +2248,15 @@ function render(state){
 
   renderCoinHeader(rightCoin,coins[rightCoin]);
 
-  updateRegimeCard(d);
-  updateMoneyFlow(d);
-  updateFlowCard(d);
-  updateMarketCard(d);
-  document.getElementById('card-taker').innerHTML=buildTakerCard(d);
-  document.getElementById('card-liq').innerHTML=buildLiqCard();
-  document.getElementById('card-cvd').innerHTML=buildCvdCard(d);
-  document.getElementById('fr-ext-card').innerHTML=buildFrExtCard(state);
-  document.getElementById('whale-list').innerHTML=buildWhales(ws3Data.whale_alerts||state.whale_alerts);
+  try{updateRegimeCard(d);}catch(e){console.error('RegimeCard error:',e);}
+  try{updateMoneyFlow(d);}catch(e){console.error('MoneyFlow error:',e);}
+  try{updateFlowCard(d);}catch(e){console.error('FlowCard error:',e);}
+  try{updateMarketCard(d);}catch(e){console.error('MarketCard error:',e);}
+  try{document.getElementById('card-taker').innerHTML=buildTakerCard(d);}catch(e){console.error('TakerCard error:',e);}
+  try{document.getElementById('card-liq').innerHTML=buildLiqCard();}catch(e){console.error('LiqCard error:',e);}
+  try{document.getElementById('card-cvd').innerHTML=buildCvdCard(d);}catch(e){console.error('CvdCard error:',e);}
+  try{document.getElementById('fr-ext-card').innerHTML=buildFrExtCard(state);}catch(e){console.error('FrExtCard error:',e);}
+  try{document.getElementById('whale-list').innerHTML=buildWhales(ws3Data.whale_alerts||state.whale_alerts);}catch(e){console.error('Whales error:',e);}
 }
 
 // ── Coin Selection ───────────────────────
