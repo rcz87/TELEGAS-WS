@@ -2168,17 +2168,34 @@ function updateRegimeCard(d){
   let{regime,conf:regimeConf,scores}=detectRegime(d);
 
   // Regime persistence: require 2 consecutive same detections before switching
+  // BUT force-release if held regime score dropped below top-2
   regimeHistory.push(regime);
   if(regimeHistory.length>5)regimeHistory.shift();
   if(regimeHistory.length>=2&&lastRegime!=='RANGE'){
     const last2=regimeHistory.slice(-2);
-    // If new regime differs from current, only switch if last 2 agree
     if(regime!==lastRegime&&!(last2[0]===regime&&last2[1]===regime)){
-      regime=lastRegime; // hold current regime
+      // Check if held regime is still competitive (top-2 score)
+      const sorted=Object.entries(scores).sort((a,b)=>b[1]-a[1]);
+      const top2=sorted.slice(0,2).map(s=>s[0]);
+      if(top2.includes(lastRegime)){
+        regime=lastRegime; // hold — still in top 2
+      }
+      // else: release — held regime score dropped too far, accept new
     }
   }
 
-  const result=computeAdaptiveScore(d,regime,regimeConf);
+  let result=computeAdaptiveScore(d,regime,regimeConf);
+
+  // Sanity: regime vs bias contradiction auto-correct
+  // ACCUMULATION should lean LONG, DISTRIBUTION should lean SHORT
+  if(regime==='ACCUMULATION'&&result.bias==='SHORT'&&scores.DISTRIBUTION>scores.ACCUMULATION){
+    regime='DISTRIBUTION';
+    result=computeAdaptiveScore(d,regime,regimeConf);
+  } else if(regime==='DISTRIBUTION'&&result.bias==='LONG'&&scores.ACCUMULATION>scores.DISTRIBUTION){
+    regime='ACCUMULATION';
+    result=computeAdaptiveScore(d,regime,regimeConf);
+  }
+
   lastRegime=regime;lastRegimeResult=result;
 
   // Card border color
