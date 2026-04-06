@@ -2130,10 +2130,13 @@ function updateRegimeCard(d){
   statusEl.textContent=result.status;
   statusEl.className='reg-status-badge s-'+result.status.toLowerCase();
 
-  // Bias
+  // Bias — also sync header badge so they never contradict
   const biasEl=document.getElementById('reg-bias');
   biasEl.textContent=result.bias;
   biasEl.style.color=result.bias==='LONG'?'var(--green)':result.bias==='SHORT'?'var(--red)':'var(--text3)';
+  const hdrBias=document.getElementById('ch-bias');
+  hdrBias.textContent=result.bias;
+  hdrBias.className='badge '+(result.bias==='LONG'?'b-long':result.bias==='SHORT'?'b-short':'b-neutral');
 
   // Metrics
   document.getElementById('reg-conf-val').textContent=result.confidence+'%';
