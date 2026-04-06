@@ -28,6 +28,7 @@ import collections
 import json as _json
 import sys
 import signal
+import time
 import os
 import threading
 from pathlib import Path
@@ -68,6 +69,7 @@ from src.ml.ml_inference import MLInferenceEngine
 from src.ml.guardrails import MLGuardrails
 from src.signals.signal_lifecycle import SignalLifecycleManager
 from src.signals.rest_signal_detector import RestSignalDetector
+from src.alerts.movement_detector import MovementDetector
 
 # Global flag for shutdown
 shutdown_event = asyncio.Event()
@@ -150,6 +152,9 @@ class TeleglasPro:
         # Alerts
         self.message_formatter = MessageFormatter()
         self.alert_queue = AlertQueue(max_size=1000)
+
+        # Movement detector (stealth flow, flush/absorption, quiet-to-move)
+        self.movement_detector = MovementDetector()
 
         # Leading indicator scorer (CVD + OI primary scoring, tier-aware)
         self.leading_scorer = LeadingIndicatorScorer(monitoring_config=monitoring_config)
@@ -610,6 +615,36 @@ class TeleglasPro:
             self._write_live_state(symbols)
         except Exception as e:
             self.logger.error(f"Fast poll state write error: {e}")
+
+    async def _movement_detector_task(self):
+        """Run MovementDetector every 30s — stealth flow, flush, absorption alerts."""
+        self.logger.info("🔍 MovementDetector started (30s interval)")
+        await asyncio.sleep(60)  # Wait for initial data
+
+        while not shutdown_event.is_set():
+            try:
+                alerts = self.movement_detector.scan(
+                    self.market_context_buffer, self.buffer_manager
+                )
+                for alert in alerts:
+                    msg = alert.get("message", "")
+                    priority = alert.get("priority", 2)
+                    if msg:
+                        await self.alert_queue.add(msg, priority=priority)
+                        self.logger.info(
+                            f"🔍 Movement: {alert.get('type')} {alert.get('coin')} "
+                            f"{alert.get('direction')}"
+                        )
+            except Exception as e:
+                self.logger.error(f"MovementDetector error: {e}")
+
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=30)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+        self.logger.info("MovementDetector stopped")
 
     async def _on_orderbook_data(self, snapshot):
         """Callback: store orderbook delta in buffer."""
@@ -2108,6 +2143,11 @@ class TeleglasPro:
                 tasks.append(
                     asyncio.create_task(self.rest_poller.start_fast_poll(shutdown_event))
                 )
+
+            # Start movement detector scan loop
+            tasks.append(
+                asyncio.create_task(self._movement_detector_task())
+            )
 
             self.logger.info("=" * 60)
             self.logger.info("✅ TELEGLAS Pro v4.0 - Running (ALL-COIN Monitoring)")
