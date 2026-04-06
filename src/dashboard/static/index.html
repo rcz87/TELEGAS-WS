@@ -182,6 +182,39 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 .w-action.close{background:var(--border);color:var(--text3);}
 .no-data{color:var(--border2);text-align:center;padding:12px;font-size:11px;}
 
+/* ===== MONEY FLOW PANEL ===== */
+.mf-section{padding:10px 16px 0;}
+.mf-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;}
+.mf-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;}
+.mf-title{font-size:10px;font-weight:bold;color:var(--blue);text-transform:uppercase;letter-spacing:.8px;}
+.mf-session{font-size:9px;padding:2px 8px;border-radius:10px;font-weight:bold;}
+.mf-session.asia{background:var(--yellow-bg);color:var(--yellow);}
+.mf-session.london{background:var(--blue-bg);color:var(--blue);}
+.mf-session.ny{background:var(--green-bg);color:var(--green);}
+.mf-session.overlap{background:var(--red-bg);color:var(--red);}
+.mf-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;}
+.mf-box{background:var(--bg);border-radius:6px;padding:8px 10px;}
+.mf-box.full{grid-column:span 2;}
+.mf-box-label{font-size:9px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;}
+.mf-box-val{font-size:12px;font-weight:bold;color:var(--text);}
+.mf-box-sub{font-size:9px;color:var(--text3);margin-top:2px;}
+.mf-state{background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:6px;border-left:3px solid var(--text4);}
+.mf-state.bullish{border-left-color:var(--green);}
+.mf-state.bearish{border-left-color:var(--red);}
+.mf-state.neutral{border-left-color:var(--yellow);}
+.mf-state-label{font-size:10px;font-weight:bold;margin-bottom:2px;}
+.mf-state-evidence{font-size:9px;color:var(--text3);}
+.mf-checklist{display:flex;flex-wrap:wrap;gap:4px;margin-top:6px;}
+.mf-check{font-size:9px;padding:2px 7px;border-radius:10px;border:1px solid var(--border2);color:var(--text3);}
+.mf-check.pass{background:var(--green-bg);border-color:#065f46;color:var(--green);}
+.mf-check.fail{background:var(--red-bg);border-color:#991b1b;color:var(--red);}
+.mf-check.warn{background:var(--yellow-bg);border-color:#78350f;color:var(--yellow);}
+.mf-funding{display:flex;gap:8px;align-items:center;font-size:10px;margin-top:6px;padding:6px 8px;background:var(--bg);border-radius:6px;}
+.mf-funding-tag{font-size:9px;padding:2px 6px;border-radius:4px;font-weight:bold;}
+.mf-funding-tag.safe{background:var(--green-bg);color:var(--green);}
+.mf-funding-tag.caution{background:var(--yellow-bg);color:var(--yellow);}
+.mf-funding-tag.danger{background:var(--red-bg);color:var(--red);}
+
 /* ===== SIGNAL LIFECYCLE PANEL ===== */
 .sig-panel{padding:0 16px 10px;}
 .sig-card{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;}
@@ -552,6 +585,66 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
   <div class="card" id="card-liq"></div>
   <!-- F: CVD HISTORY -->
   <div class="card" id="card-cvd"></div>
+</div>
+
+<!-- ===== 6C. MONEY FLOW INTELLIGENCE ===== -->
+<div class="mf-section">
+  <div class="mf-card">
+    <div class="mf-hdr">
+      <span class="mf-title">MONEY FLOW INTELLIGENCE</span>
+      <span class="mf-session" id="mf-session">--</span>
+    </div>
+
+    <!-- Flow Snapshot Grid -->
+    <div class="mf-grid">
+      <div class="mf-box">
+        <div class="mf-box-label">TAKER NET FLOW</div>
+        <div class="mf-box-val" id="mf-taker-net">--</div>
+        <div class="mf-box-sub" id="mf-taker-sub">Buy -- / Sell --</div>
+      </div>
+      <div class="mf-box">
+        <div class="mf-box-label">OI + PRICE MATRIX</div>
+        <div class="mf-box-val" id="mf-oi-matrix">--</div>
+        <div class="mf-box-sub" id="mf-oi-sub">OI -- | Price --</div>
+      </div>
+      <div class="mf-box">
+        <div class="mf-box-label">CVD ALIGNMENT</div>
+        <div class="mf-box-val" id="mf-cvd-align">--</div>
+        <div class="mf-box-sub" id="mf-cvd-sub">Spot -- / Fut --</div>
+      </div>
+      <div class="mf-box">
+        <div class="mf-box-label">ORDERBOOK PRESSURE</div>
+        <div class="mf-box-val" id="mf-ob-val">--</div>
+        <div class="mf-box-sub" id="mf-ob-sub">Bid -- / Ask --</div>
+      </div>
+    </div>
+
+    <!-- Flow State -->
+    <div class="mf-state" id="mf-flow-state">
+      <div class="mf-state-label" id="mf-flow-label">FLOW STATE: --</div>
+      <div class="mf-state-evidence" id="mf-flow-evidence">Waiting for data...</div>
+    </div>
+
+    <!-- Market Classification -->
+    <div class="mf-state" id="mf-market-state">
+      <div class="mf-state-label" id="mf-market-label">MARKET: --</div>
+      <div class="mf-state-evidence" id="mf-market-evidence">Waiting for data...</div>
+    </div>
+
+    <!-- Entry Checklist -->
+    <div style="margin-top:6px;">
+      <div style="font-size:9px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">ENTRY CHECKLIST</div>
+      <div class="mf-checklist" id="mf-checklist"></div>
+    </div>
+
+    <!-- Funding State -->
+    <div class="mf-funding" id="mf-funding">
+      <span style="color:var(--text4);font-size:9px;">FUNDING:</span>
+      <span id="mf-fr-val">--</span>
+      <span class="mf-funding-tag safe" id="mf-fr-tag">--</span>
+      <span style="color:var(--text4);font-size:9px;" id="mf-fr-time">--</span>
+    </div>
+  </div>
 </div>
 
 <!-- ===== 7. WHALE INTELLIGENCE ===== -->
@@ -1692,18 +1785,41 @@ async function runAiAnalysis(){
     if(data.error){
       statusEl.textContent='Error: '+data.error;statusEl.style.color='var(--red)';
     } else {
-      // Format the response with colors
+      // Format the response with colors — Money Flow v2 sections
       let html=data.analysis
+        // Section headers (numbered)
+        .replace(/^(\d+\.\s*FLOW SNAPSHOT)/m,'<span style="color:var(--blue);font-weight:bold;font-size:12px;display:block;margin-top:6px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        .replace(/^(\d+\.\s*FLOW STATE)/m,'<span style="color:#8b5cf6;font-weight:bold;font-size:12px;display:block;margin-top:6px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        .replace(/^(\d+\.\s*FUNDING STATE)/m,'<span style="color:var(--yellow);font-weight:bold;font-size:12px;display:block;margin-top:6px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        .replace(/^(\d+\.\s*MARKET CLASSIFICATION)/m,'<span style="color:var(--blue);font-weight:bold;font-size:12px;display:block;margin-top:6px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        .replace(/^(\d+\.\s*VERDICT)/m,'<span style="color:var(--green);font-weight:bold;font-size:12px;display:block;margin-top:8px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        .replace(/^(\d+\.\s*KEY SIGNALS)/m,'<span style="color:var(--blue);font-weight:bold;font-size:12px;display:block;margin-top:6px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        .replace(/^(\d+\.\s*DANGER)/m,'<span style="color:var(--red);font-weight:bold;font-size:12px;display:block;margin-top:6px;border-bottom:1px solid var(--border);padding-bottom:2px">$1</span>')
+        // Legacy format fallback
         .replace(/^(REGIME:)/m,'<span style="color:var(--blue);font-weight:bold">$1</span>')
         .replace(/^(BIAS:)/m,'<span style="color:var(--blue);font-weight:bold">$1</span>')
         .replace(/^(CONVICTION:)/m,'<span style="color:var(--blue);font-weight:bold">$1</span>')
         .replace(/^(ENTRY:)/m,'<span style="color:var(--green);font-weight:bold">$1</span>')
         .replace(/^(STOP LOSS:)/m,'<span style="color:var(--red);font-weight:bold">$1</span>')
         .replace(/^(TARGET:)/m,'<span style="color:var(--green);font-weight:bold">$1</span>')
+        .replace(/^(R\/R:)/m,'<span style="color:var(--yellow);font-weight:bold">$1</span>')
         .replace(/^(RISK:)/m,'<span style="color:var(--yellow);font-weight:bold">$1</span>')
         .replace(/^(ANALYSIS:)/m,'<span style="color:var(--blue);font-weight:bold">$1</span>')
         .replace(/^(KEY SIGNALS:)/m,'<span style="color:var(--blue);font-weight:bold">$1</span>')
         .replace(/^(DANGER:)/m,'<span style="color:var(--red);font-weight:bold">$1</span>')
+        // Flow state labels
+        .replace(/\b(BUYING ACCELERATING)\b/g,'<span style="color:var(--green);font-weight:bold">$1</span>')
+        .replace(/\b(SELLING ACCELERATING)\b/g,'<span style="color:var(--red);font-weight:bold">$1</span>')
+        .replace(/\b(MOMENTUM DECELERATING)\b/g,'<span style="color:var(--yellow);font-weight:bold">$1</span>')
+        .replace(/\b(EXHAUSTED)\b/g,'<span style="color:var(--yellow);font-weight:bold">$1</span>')
+        .replace(/\b(CHOPPY)\b/g,'<span style="color:var(--text3);font-weight:bold">$1</span>')
+        // Market states
+        .replace(/\b(CONTINUATION)\b/g,'<span style="color:var(--blue);font-weight:bold">$1</span>')
+        .replace(/\b(SQUEEZE)\b/g,'<span style="color:#8b5cf6;font-weight:bold">$1</span>')
+        .replace(/\b(ABSORPTION)\b/g,'<span style="color:var(--blue);font-weight:bold">$1</span>')
+        .replace(/\b(DISTRIBUTION)\b/g,'<span style="color:var(--red);font-weight:bold">$1</span>')
+        .replace(/\b(DELEVERAGING)\b/g,'<span style="color:var(--red);font-weight:bold">$1</span>')
+        // Direction words
         .replace(/\bLONG\b/g,'<span style="color:var(--green);font-weight:bold">LONG</span>')
         .replace(/\bSHORT\b/g,'<span style="color:var(--red);font-weight:bold">SHORT</span>')
         .replace(/\bNO TRADE\b/g,'<span style="color:var(--text3);font-weight:bold">NO TRADE</span>')
@@ -1725,7 +1841,7 @@ async function runAiAnalysis(){
       }
 
       resultEl.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;padding-bottom:4px;border-bottom:1px solid var(--border)">
-        <span style="color:var(--blue);font-weight:bold;font-size:10px">CLAUDE SNIPER ANALYSIS — ${rightCoin}</span>
+        <span style="color:var(--blue);font-weight:bold;font-size:10px">MONEY FLOW ANALYSIS — ${rightCoin}</span>
         <span style="color:var(--text4);font-size:9px">${ts} | ${data.model||''}</span>
       </div>${html}${trackBar}`;
       resultEl.style.display='block';
@@ -1736,6 +1852,197 @@ async function runAiAnalysis(){
   }
   btn.disabled=false;btn.textContent='ANALISA AI';btn.style.opacity='1';
 }
+
+// ── Money Flow Intelligence Panel ────────
+function updateMoneyFlow(d){
+  // Session detection (WIB = UTC+7)
+  const now=new Date();
+  const wibH=(now.getUTCHours()+7)%24;
+  let sessionLabel='',sessionCls='';
+  if(wibH>=7&&wibH<15){sessionLabel='ASIA';sessionCls='asia';}
+  else if(wibH>=14&&wibH<19){sessionLabel='LONDON';sessionCls='london';}
+  else if(wibH>=19||wibH<3){sessionLabel='NY';sessionCls='ny';}
+  else{sessionLabel='OVERLAP';sessionCls='overlap';}
+  const sesEl=document.getElementById('mf-session');
+  sesEl.textContent=sessionLabel;sesEl.className='mf-session '+sessionCls;
+
+  // Taker Net Flow
+  const tBuy=d.taker_buy_vol||0, tSell=d.taker_sell_vol||0;
+  const tNet=tBuy-tSell;
+  const tNetEl=document.getElementById('mf-taker-net');
+  tNetEl.textContent=(tNet>=0?'+':'')+fmtM(tNet);
+  tNetEl.className='mf-box-val '+(tNet>0?'pos':tNet<0?'neg':'');
+  const tPct=tBuy+tSell>0?Math.round(tBuy/(tBuy+tSell)*100):50;
+  document.getElementById('mf-taker-sub').textContent=`Buy ${tPct}% / Sell ${100-tPct}%`;
+
+  // OI + Price Matrix
+  const oiChg=d.oi_change_1h||0, priceChg=d.change_24h||0;
+  let matrix='FLAT',matrixCls='';
+  if(oiChg>0.5&&priceChg>0){matrix='MOMENTUM';matrixCls='pos';}
+  else if(oiChg>0.5&&priceChg<0){matrix='SHORT ADDING';matrixCls='neg';}
+  else if(oiChg<-0.5&&priceChg>0){matrix='SHORT COVERING';matrixCls='pos';}
+  else if(oiChg<-0.5&&priceChg<0){matrix='DELEVERAGING';matrixCls='neg';}
+  const mxEl=document.getElementById('mf-oi-matrix');
+  mxEl.textContent=matrix;mxEl.className='mf-box-val '+matrixCls;
+  document.getElementById('mf-oi-sub').textContent=`OI ${oiChg>=0?'+':''}${oiChg.toFixed(2)}% | Price ${priceChg>=0?'+':''}${priceChg.toFixed(2)}%`;
+
+  // CVD Alignment
+  const spotDir=d.spot_cvd_dir||'FLAT', futDir=d.fut_cvd_dir||'FLAT';
+  let cvdAlign='DIVERGENCE',cvdCls='';
+  if(spotDir==='RISING'&&futDir==='RISING'){cvdAlign='ALIGNED BULLISH';cvdCls='pos';}
+  else if(spotDir==='FALLING'&&futDir==='FALLING'){cvdAlign='ALIGNED BEARISH';cvdCls='neg';}
+  else if(spotDir==='RISING'&&futDir==='FALLING'){cvdAlign='SPOT LEADS (divergence)';cvdCls='';}
+  else if(spotDir==='FALLING'&&futDir==='RISING'){cvdAlign='FUT LEADS (divergence)';cvdCls='';}
+  const caEl=document.getElementById('mf-cvd-align');
+  caEl.textContent=cvdAlign;caEl.className='mf-box-val '+cvdCls;
+  document.getElementById('mf-cvd-sub').textContent=`Spot ${spotDir} / Fut ${futDir}`;
+
+  // Orderbook Pressure
+  const obBid=d.ob_bid||0, obAsk=d.ob_ask||0, obTotal=obBid+obAsk||1;
+  const obPct=Math.round(obBid/obTotal*100);
+  const obDom=d.ob_dominant||'N/A';
+  const obEl=document.getElementById('mf-ob-val');
+  obEl.textContent=obDom;
+  obEl.className='mf-box-val '+(obDom==='BID'?'pos':obDom==='ASK'?'neg':'');
+  document.getElementById('mf-ob-sub').textContent=`Bid ${obPct}% / Ask ${100-obPct}%`;
+
+  // Flow State Detection (Acceleration / Exhaustion)
+  const spotSpark=d.spot_cvd_spark||[];
+  const futSpark=d.fut_cvd_spark||[];
+  let flowState='WAITING FOR DATA',flowEvidence='Insufficient sparkline data',flowCls='neutral';
+
+  if(spotSpark.length>=6&&futSpark.length>=6){
+    // Check acceleration: last 3 deltas increasing
+    const spotDeltas=[];for(let i=1;i<spotSpark.length;i++)spotDeltas.push(spotSpark[i]-spotSpark[i-1]);
+    const futDeltas=[];for(let i=1;i<futSpark.length;i++)futDeltas.push(futSpark[i]-futSpark[i-1]);
+    const last3s=spotDeltas.slice(-3),last3f=futDeltas.slice(-3);
+
+    const buyAccel=last3s.length>=3&&last3s[0]>0&&last3s[1]>last3s[0]&&last3s[2]>last3s[1];
+    const sellAccel=last3s.length>=3&&last3s[0]<0&&last3s[1]<last3s[0]&&last3s[2]<last3s[1];
+    const futBuyAccel=last3f.length>=3&&last3f[0]>0&&last3f[1]>last3f[0]&&last3f[2]>last3f[1];
+    const futSellAccel=last3f.length>=3&&last3f[0]<0&&last3f[1]<last3f[0]&&last3f[2]<last3f[1];
+
+    // Check deceleration
+    const avgFirst=spotDeltas.slice(0,Math.floor(spotDeltas.length/2));
+    const avgSecond=spotDeltas.slice(Math.floor(spotDeltas.length/2));
+    const absFirst=avgFirst.reduce((s,v)=>s+Math.abs(v),0)/(avgFirst.length||1);
+    const absSecond=avgSecond.reduce((s,v)=>s+Math.abs(v),0)/(avgSecond.length||1);
+    const decel=absSecond<absFirst*0.7;
+
+    // Check exhaustion: magnitude near zero
+    const recentMag=Math.abs(last3s.reduce((s,v)=>s+v,0)/3);
+    const peakMag=Math.max(...spotDeltas.map(Math.abs))||1;
+    const exhausted=recentMag<peakMag*0.1;
+
+    // Check chop: alternating sign
+    const signChanges=spotDeltas.slice(-6).reduce((c,v,i,a)=>i>0&&Math.sign(v)!==Math.sign(a[i-1])?c+1:c,0);
+    const choppy=signChanges>=3;
+
+    if(buyAccel||futBuyAccel){
+      flowState='BUYING ACCELERATING';flowCls='bullish';
+      flowEvidence=`SpotCVD delta increasing${futBuyAccel?' + FutCVD accelerating':''}`;
+    }else if(sellAccel||futSellAccel){
+      flowState='SELLING ACCELERATING';flowCls='bearish';
+      flowEvidence=`SpotCVD delta deepening${futSellAccel?' + FutCVD accelerating sell':''}`;
+    }else if(exhausted){
+      flowState='EXHAUSTED';flowCls='neutral';
+      flowEvidence=`Flow magnitude at ${(recentMag/peakMag*100).toFixed(0)}% of peak — potential reversal zone`;
+    }else if(decel){
+      flowState='MOMENTUM DECELERATING';flowCls='neutral';
+      flowEvidence=`Recent flow ${(absSecond/absFirst*100).toFixed(0)}% of earlier magnitude`;
+    }else if(choppy){
+      flowState='CHOPPY';flowCls='neutral';
+      flowEvidence=`${signChanges} direction changes in last 6 bars — no edge`;
+    }else{
+      // Default: steady
+      const netRecent=last3s.reduce((s,v)=>s+v,0);
+      if(netRecent>0){flowState='BUYING STEADY';flowCls='bullish';flowEvidence='Consistent positive SpotCVD deltas';}
+      else if(netRecent<0){flowState='SELLING STEADY';flowCls='bearish';flowEvidence='Consistent negative SpotCVD deltas';}
+      else{flowState='FLAT';flowCls='neutral';flowEvidence='No significant flow direction';}
+    }
+  }
+
+  const fsEl=document.getElementById('mf-flow-state');
+  fsEl.className='mf-state '+flowCls;
+  document.getElementById('mf-flow-label').textContent='FLOW STATE: '+flowState;
+  document.getElementById('mf-flow-evidence').textContent=flowEvidence;
+
+  // Market Classification (Rule 10)
+  let mktState='UNKNOWN',mktConf='LOW',mktEvidence='',mktCls='neutral';
+  const fr=d.funding_rate||0;
+  const spotCvd=d.spot_cvd||0, futCvd=d.fut_cvd||0;
+  const spotSlope=d.spot_cvd_slope||0, futSlope=d.fut_cvd_slope||0;
+
+  if(cvdAlign.includes('ALIGNED BULLISH')&&oiChg>0&&tNet>0){
+    mktState='CONTINUATION ↑';mktConf='HIGH';mktCls='bullish';
+    mktEvidence='CVD aligned bullish + OI rising + taker net positive';
+  }else if(cvdAlign.includes('ALIGNED BEARISH')&&oiChg>0&&tNet<0){
+    mktState='CONTINUATION ↓';mktConf='HIGH';mktCls='bearish';
+    mktEvidence='CVD aligned bearish + OI rising + taker net negative';
+  }else if(Math.abs(fr)>0.05&&oiChg>0){
+    mktState='SQUEEZE SETUP';mktConf='MEDIUM';mktCls=fr<0?'bullish':'bearish';
+    mktEvidence=`FR extreme ${fr.toFixed(4)}% + OI building → ${fr<0?'short':'long'} squeeze risk`;
+  }else if(oiChg<-1&&priceChg<-1){
+    mktState='DELEVERAGING';mktConf='HIGH';mktCls='bearish';
+    mktEvidence='OI dropping + price falling — forced liquidation';
+  }else if(oiChg<-0.5&&priceChg>0.5){
+    mktState='SHORT COVERING';mktConf='MEDIUM';mktCls='neutral';
+    mktEvidence='OI dropping + price rising — less reliable rally';
+  }else if(spotDir==='RISING'&&oiChg>0.3&&Math.abs(priceChg)<0.3){
+    mktState='ABSORPTION';mktConf='MEDIUM';mktCls='bullish';
+    mktEvidence='SpotCVD rising + OI building + price flat — stealth accumulation';
+  }else if(priceChg>0&&obDom==='ASK'&&spotSlope<0){
+    mktState='DISTRIBUTION';mktConf='MEDIUM';mktCls='bearish';
+    mktEvidence='Price up but OB ask dominant + SpotCVD fading — distribution';
+  }else if(oiChg<-0.3&&Math.abs(priceChg)<0.5&&flowState.includes('DECEL')){
+    mktState='PROFIT-TAKING';mktConf='LOW';mktCls='neutral';
+    mktEvidence='OI dropping + price stable + flow decelerating';
+  }else if(flowState==='CHOPPY'||cvdAlign.includes('divergence')){
+    mktState='CHOP / TRANSITION';mktConf='LOW';mktCls='neutral';
+    mktEvidence='CVD divergence or choppy flow — no edge, wait';
+  }else{
+    mktState=matrix;mktConf='LOW';
+    mktCls=priceChg>0?'bullish':priceChg<0?'bearish':'neutral';
+    mktEvidence='Defaulting to OI+Price matrix — limited data alignment';
+  }
+
+  const msEl=document.getElementById('mf-market-state');
+  msEl.className='mf-state '+mktCls;
+  document.getElementById('mf-market-label').textContent=`MARKET: ${mktState} (${mktConf})`;
+  document.getElementById('mf-market-evidence').textContent=mktEvidence;
+
+  // Entry Checklist (Rule 15)
+  const checks=[
+    {label:'CVD ALIGNED',pass:cvdAlign.includes('ALIGNED'),desc:'SpotCVD+FutCVD same direction'},
+    {label:'OI CONFIRM',pass:oiChg>0.2||matrix==='MOMENTUM',desc:'OI supporting'},
+    {label:'TAKER CONFIRM',pass:Math.abs(tNet)>0&&((tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')),desc:'Taker matches flow'},
+    {label:'NOT CHOP',pass:!mktState.includes('CHOP')&&!mktState.includes('TRANSITION'),desc:'Market state tradeable'},
+    {label:'FLOW OK',pass:!flowState.includes('CHOPPY')&&!flowState.includes('EXHAUSTED'),desc:'Flow has direction'},
+    {label:'FR SAFE',pass:Math.abs(fr)<0.05,warn:Math.abs(fr)>=0.03,desc:'Funding not extreme'},
+    {label:'SESSION',pass:sessionLabel==='NY'||sessionLabel==='LONDON',warn:sessionLabel==='ASIA',desc:'Volume session'},
+  ];
+  document.getElementById('mf-checklist').innerHTML=checks.map(c=>{
+    const cls=c.pass?'pass':(c.warn?'warn':'fail');
+    return`<span class="mf-check ${cls}" title="${c.desc}">${c.pass?'✓':'✗'} ${c.label}</span>`;
+  }).join('');
+
+  // Funding State
+  const frEl=document.getElementById('mf-fr-val');
+  frEl.textContent=fr.toFixed(4)+'%';
+  frEl.className=fr>0?'neg':fr<0?'pos':'';
+  // Next funding (every 8h UTC: 0, 8, 16)
+  const utcH=now.getUTCHours(),utcM=now.getUTCMinutes();
+  const fundHours=[0,8,16,24];
+  let minsToFund=999;
+  for(const fh of fundHours){if(fh*60>utcH*60+utcM){minsToFund=fh*60-(utcH*60+utcM);break;}}
+  const frTag=document.getElementById('mf-fr-tag');
+  if(minsToFund<=15){frTag.textContent='DANGER ZONE';frTag.className='mf-funding-tag danger';}
+  else if(minsToFund<=60){frTag.textContent='CAUTION';frTag.className='mf-funding-tag caution';}
+  else{frTag.textContent='SAFE';frTag.className='mf-funding-tag safe';}
+  document.getElementById('mf-fr-time').textContent=`Next: ${minsToFund}min`;
+}
+
+function fmtM(v){const a=Math.abs(v);if(a>=1e9)return'$'+(v/1e9).toFixed(2)+'B';if(a>=1e6)return'$'+(v/1e6).toFixed(2)+'M';if(a>=1e3)return'$'+(v/1e3).toFixed(1)+'K';return'$'+v.toFixed(0);}
 
 function updateRegimeCard(d){
   const{regime,conf:regimeConf,scores}=detectRegime(d);
@@ -1805,6 +2112,7 @@ function render(state){
   renderCoinHeader(rightCoin,coins[rightCoin]);
 
   updateRegimeCard(d);
+  updateMoneyFlow(d);
   updateFlowCard(d);
   updateMarketCard(d);
   document.getElementById('card-taker').innerHTML=buildTakerCard(d);

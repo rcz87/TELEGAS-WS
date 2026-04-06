@@ -626,70 +626,162 @@ async def analyze_coin(request: Request):
                 for x in pos[:3]:
                     whale_block += f"  - {x.get('coin','')} FR: {x.get('fr',0):.4f}% (longs pay)\n"
 
+        # ── Determine session + funding proximity ──
+        import datetime as _dt
+        now_wib = _dt.datetime.utcnow() + _dt.timedelta(hours=7)
+        hour_wib = now_wib.hour
+        if 7 <= hour_wib < 15:
+            session_label = "ASIA (low-medium volume)"
+        elif 14 <= hour_wib < 19:
+            session_label = "LONDON (medium-high volume)"
+        elif 19 <= hour_wib or hour_wib < 3:
+            session_label = "NY (HIGHEST volume)"
+        else:
+            session_label = "NY-ASIA OVERLAP (thin liquidity — AVOID)"
+
+        # Funding settlement every 8h: 00:00, 08:00, 16:00 UTC
+        utc_now = _dt.datetime.utcnow()
+        funding_hours = [0, 8, 16]
+        next_fund = None
+        for fh in sorted(funding_hours):
+            candidate = utc_now.replace(hour=fh, minute=0, second=0, microsecond=0)
+            if candidate <= utc_now:
+                candidate += _dt.timedelta(days=1) if fh == max(funding_hours) else _dt.timedelta(hours=0)
+                candidate = utc_now.replace(hour=fh, minute=0, second=0) + _dt.timedelta(days=1 if candidate <= utc_now else 0)
+            if candidate > utc_now:
+                if next_fund is None or candidate < next_fund:
+                    next_fund = candidate
+        mins_to_funding = int((next_fund - utc_now).total_seconds() / 60) if next_fund else 999
+        funding_warning = ""
+        if mins_to_funding <= 60:
+            funding_warning = f"\n⚠️ FUNDING SETTLEMENT IN {mins_to_funding} MINUTES — check squeeze/flush risk!"
+        if mins_to_funding <= 15:
+            funding_warning = f"\n🚨 FUNDING IN {mins_to_funding} MIN — DANGER ZONE. NO ENTRY unless extreme FR squeeze play."
+
+        # ── Taker math ──
+        taker_buy = coin_data.get('taker_buy_vol', 0) or 0
+        taker_sell = coin_data.get('taker_sell_vol', 0) or 0
+        taker_net = taker_buy - taker_sell
+        price = coin_data.get('price', 0) or 0
+        price_change_24h_pct = coin_data.get('change_24h', 0) or 0
+
+        # ── OI interpretation (Rule 2 matrix) ──
+        oi_change = coin_data.get('oi_change_1h', 0) or 0
+        oi_price_interp = "N/A"
+        if oi_change > 0.5 and price_change_24h_pct > 0:
+            oi_price_interp = "MOMENTUM — new positions entering with trend"
+        elif oi_change > 0.5 and price_change_24h_pct < 0:
+            oi_price_interp = "SHORT ADDING — aggressive shorts entering"
+        elif oi_change < -0.5 and price_change_24h_pct > 0:
+            oi_price_interp = "SHORT COVERING — less reliable rally"
+        elif oi_change < -0.5 and price_change_24h_pct < 0:
+            oi_price_interp = "DELEVERAGING — forced liquidation"
+        else:
+            oi_price_interp = coin_data.get('oi_interp', 'FLAT / NO CLEAR SIGNAL')
+
+        # Funding rate value
+        fr_val = coin_data.get('funding_rate', 0) or 0
+        fr_extreme = abs(fr_val) > 0.05
+
         # Build the analysis prompt
-        prompt = f"""You are TELEGLAS SNIPER — a crypto derivatives execution analyst that EVOLVES.
-You learn from your past calls. If your history shows mistakes, adapt your strategy.
-You have access to time-series data — use it to understand MOMENTUM, not just current state.
+        prompt = f"""You are TELEGLAS MONEY FLOW ANALYST — a crypto derivatives execution system using the MONEY FLOW TRADING RULES v2 framework by Ricoz87.
+You learn from your past calls. You CALCULATE money flow, not guess direction.
+"Kita bukan menebak arah — kita MENGHITUNG uang yang mengalir."
 
 COIN: {symbol}
+SESSION: {session_label} (WIB {now_wib.strftime('%H:%M')})
+FUNDING: Next settlement in {mins_to_funding} min{funding_warning}
 
-CURRENT SNAPSHOT:
-- Price: ${coin_data.get('price', 0)} | 24h Change: {coin_data.get('change_24h', 0):.2f}%
-- Spot CVD: {coin_data.get('spot_cvd', 0):,.0f} | Direction: {coin_data.get('spot_cvd_dir', 'FLAT')} | Slope: {coin_data.get('spot_cvd_slope', 0):.3f}
-- Futures CVD: {coin_data.get('fut_cvd', 0):,.0f} | Direction: {coin_data.get('fut_cvd_dir', 'FLAT')} | Slope: {coin_data.get('fut_cvd_slope', 0):.3f}
-- Open Interest: ${coin_data.get('oi_usd', 0):,.0f} | 1h Change: {coin_data.get('oi_change_1h', 0):.2f}% | Interp: {coin_data.get('oi_interp', 'N/A')}
-- Funding Rate: {coin_data.get('funding_rate', 0):.4f}%
-- Taker Buy: ${coin_data.get('taker_buy_vol', 0):,.0f} | Sell: ${coin_data.get('taker_sell_vol', 0):,.0f}
-- Orderbook: Bid ${coin_data.get('ob_bid', 0):,.0f} vs Ask ${coin_data.get('ob_ask', 0):,.0f} | Dominant: {coin_data.get('ob_dominant', 'N/A')}
-- Long Score: {coin_data.get('long_score', 0)} | Short Score: {coin_data.get('short_score', 0)}
-- Bias: {coin_data.get('bias', 'NEUTRAL')}
-- Volume 24h: ${coin_data.get('volume_24h', 0):,.0f}
+═══ RAW DATA ═══
+PRICE: ${price:,.4f} | 24h Change: {price_change_24h_pct:+.2f}%
+VOLUME 24h: ${coin_data.get('volume_24h', 0):,.0f}
+
+SPOT CVD: {coin_data.get('spot_cvd', 0):,.0f} | Dir: {coin_data.get('spot_cvd_dir', 'FLAT')} | Slope: {coin_data.get('spot_cvd_slope', 0):.3f}
+FUTURES CVD: {coin_data.get('fut_cvd', 0):,.0f} | Dir: {coin_data.get('fut_cvd_dir', 'FLAT')} | Slope: {coin_data.get('fut_cvd_slope', 0):.3f}
+OI: ${coin_data.get('oi_usd', 0):,.0f} | 1h Change: {oi_change:+.2f}% | Matrix: {oi_price_interp}
+FUNDING RATE: {fr_val:.4f}%{' ⚠️ EXTREME' if fr_extreme else ''}
+TAKER BUY: ${taker_buy:,.0f} | SELL: ${taker_sell:,.0f} | NET: ${taker_net:+,.0f}
+ORDERBOOK: Bid ${coin_data.get('ob_bid', 0):,.0f} vs Ask ${coin_data.get('ob_ask', 0):,.0f} | Dominant: {coin_data.get('ob_dominant', 'N/A')}
+LONG SCORE: {coin_data.get('long_score', 0)} | SHORT SCORE: {coin_data.get('short_score', 0)} | BIAS: {coin_data.get('bias', 'NEUTRAL')}
 {timeseries_block}
-REGIME ANALYSIS (from scoring engine):
-- Detected Regime: {regime_data.get('regime', 'N/A')}
-- Regime Confidence: {regime_data.get('regime_conf', 0)}%
-- Grade: {regime_data.get('grade', 'N/A')}
-- Bias: {regime_data.get('bias', 'N/A')}
-- Confidence: {regime_data.get('confidence', 0)}%
-- Long Raw Score: {regime_data.get('long_raw', 0)}
-- Short Raw Score: {regime_data.get('short_raw', 0)}
+REGIME ENGINE:
+- Detected: {regime_data.get('regime', 'N/A')} | Confidence: {regime_data.get('regime_conf', 0)}%
+- Grade: {regime_data.get('grade', 'N/A')} | Bias: {regime_data.get('bias', 'N/A')}
+- Long Raw: {regime_data.get('long_raw', 0)} | Short Raw: {regime_data.get('short_raw', 0)}
 {whale_block}{history_block}{stats_block}
-CRITICAL RULES:
-- Read the TIME-SERIES data carefully. A "RISING" CVD that is DECELERATING is very different from one that is ACCELERATING.
-- If SpotCVD just flipped direction → that is a KEY signal, mention it.
-- If regime is RANGE and data is conflicting → say NO TRADE.
-- If your past calls on this coin have been wrong → acknowledge it and adjust.
-- If win rate < 50% → be MORE conservative.
-- Only give ENTRY (not "NO ENTRY") when you have HIGH conviction.
-- Price targets must be realistic (0.5-3% for scalp/swing).
+═══ MONEY FLOW RULES v2 — YOU MUST FOLLOW ═══
 
-DATA INTEGRITY RULES (NEVER VIOLATE):
-- ONLY reference data that is explicitly provided above. Do NOT invent or estimate values.
-- If liquidation cluster data is not provided → write "Target: based on support/resistance (liq map unavailable)" — NEVER invent specific liq cluster prices.
-- If SpotCVD shows "no history" → do NOT mention spot CVD in analysis.
-- If whale data is empty → do NOT mention whale activity.
-- Report CVD values exactly as shown. Do NOT reinterpret the direction or invent cumulative totals.
-- If a field shows 0 or N/A → treat it as missing data, do NOT fabricate a number.
+RULE: FLOW ACCELERATION — check if SpotCVD/FutCVD delta is ACCELERATING (each candle bigger than previous = trend strengthening) or DECELERATING (each candle smaller = trend weakening). 3+ candles same direction accelerating = strong signal. Label: BUYING ACCELERATING / SELLING ACCELERATING / MOMENTUM DECELERATING / CHOPPY.
 
-FORMAT (follow exactly):
-REGIME: [your assessment]
+RULE: EXHAUSTION CHECK — if this looks like a reversal setup, check 5 metrics:
+1) Taker Net < 10% of peak? 2) FutCVD per candle < 10% of peak? 3) Volume < 15% of peak?
+4) OI stopped dropping/flat/rising? 5) Liquidation near zero?
+Need 3/5 for TRUE EXHAUSTION. Less = NOT EXHAUSTED, do NOT counter-trade.
+
+RULE: MARKET STATE — classify as one of: CONTINUATION / REVERSAL ATTEMPT / FAILED REVERSAL / CHOP-TRANSITION / DISTRIBUTION / ABSORPTION / SQUEEZE / PROFIT-TAKING. Give confidence HIGH/MEDIUM/LOW.
+
+RULE: OI + PRICE MATRIX — OI up + Price up = MOMENTUM. OI up + Price down = SHORT ADDING. OI down + Price up = SHORT COVERING. OI down + Price down = DELEVERAGING.
+
+RULE: WHALE = CONFIRMATION ONLY — whale is NOT a trigger. Only use to confirm or deny flow direction.
+
+RULE: FUNDING TRAP — if within 60 min of funding settlement:
+- FR negative + shorts >65% = SQUEEZE RISK for shorts
+- FR positive + longs >65% = FLUSH RISK for longs
+- FR extreme (>0.05%) = EXTREME SQUEEZE SETUP possible
+
+RULE: SESSION — Asia=scan only, London=early entry, NY=prime execution. Cost per $1 changes per session. NY volume 3-5x Asia.
+
+ENTRY HARD RULES:
+❌ JANGAN LONG kalau SpotCVD + FutCVD keduanya NEGATIVE
+❌ JANGAN SHORT kalau SpotCVD + FutCVD keduanya POSITIVE
+❌ JANGAN ENTRY tanpa flow confirmation
+❌ JANGAN CHASE rally >2% dari low
+❌ JANGAN ENTRY 15 min sebelum funding KECUALI extreme FR squeeze
+❌ CHOP/TRANSITION = NO TRADE
+
+DATA INTEGRITY (NEVER VIOLATE):
+- ONLY use data provided above. NEVER invent values.
+- If data shows 0, N/A, or "no history" → say "DATA UNAVAILABLE", do NOT fabricate.
+- Report CVD exactly as shown. Do NOT reinterpret.
+
+═══ OUTPUT FORMAT (follow EXACTLY) ═══
+
+1. FLOW SNAPSHOT
+SpotCVD: [direction] [magnitude] [candle ratio if available]
+FutCVD: [direction] [magnitude] [candle ratio if available]
+Taker: [net $] [buy/sell dominant %]
+OI: [change] [matrix interpretation]
+OB: [bid/ask dominant] [ratio]
+Whale: [net direction] [key actions] (or "N/A")
+
+2. FLOW STATE
+[BUYING ACCELERATING / SELLING ACCELERATING / MOMENTUM DECELERATING / CHOPPY / EXHAUSTED]
+Evidence: [2-3 data points]
+
+3. FUNDING STATE
+FR: {fr_val:.4f}% | Squeeze Risk: [LOW/MEDIUM/HIGH]
+Settlement: {mins_to_funding} min | Action: [SAFE / AVOID / SQUEEZE PLAY]
+
+4. MARKET CLASSIFICATION
+State: [CONTINUATION / REVERSAL / CHOP / DISTRIBUTION / ABSORPTION / SQUEEZE / PROFIT-TAKING / FAILED REVERSAL]
+Confidence: [HIGH / MEDIUM / LOW]
+Evidence: [2-3 key data points]
+
+5. VERDICT
 BIAS: LONG / SHORT / NEUTRAL
 CONVICTION: HIGH / MEDIUM / LOW / NO TRADE
-ENTRY: [specific price or condition, or "NO ENTRY"]
-STOP LOSS: [specific price or invalidation]
-TARGET: [specific price or % target]
-RISK: LOW / MEDIUM / HIGH
+ENTRY: [specific price or condition, or "NO ENTRY — reason"]
+STOP LOSS: [specific price]
+TARGET: [specific price or %]
+R/R: [ratio]
 
-ANALYSIS:
-[3-4 sentences. What is happening NOW, how did we get here (use time-series), and what to do.]
-
-KEY SIGNALS:
+6. KEY SIGNALS
 - [most important signal]
 - [second signal]
 - [third signal]
 
-DANGER:
-[what could go wrong]"""
+7. DANGER
+[what invalidates this setup — be specific]"""
 
         http = await get_http()
         resp = await http.post(
@@ -701,7 +793,7 @@ DANGER:
             },
             json={
                 "model": "claude-sonnet-4-20250514",
-                "max_tokens": 800,
+                "max_tokens": 1500,
                 "messages": [{"role": "user", "content": prompt}],
             },
             timeout=30,
