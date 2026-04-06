@@ -915,11 +915,17 @@ function updateFlowCard(d){
   const spotColorHex=spotVal>=0?'#34d399':'#f87171';
   const futColorHex=futVal>=0?'#34d399':'#f87171';
 
-  // 1. Alignment badge
-  const aligned=spotDir===futDir&&spotDir!=='FLAT';
+  // 1. Alignment badge — uses both direction AND Δ60m change for accuracy
+  const spotChgRaw=d.spot_cvd_change||0, futChgRaw=d.fut_cvd_change||0;
+  const dirAligned=spotDir===futDir&&spotDir!=='FLAT';
+  const chgAligned=(spotChgRaw>0&&futChgRaw>0)||(spotChgRaw<0&&futChgRaw<0);
+  const chgConflict=(spotChgRaw>0&&futChgRaw<0)||(spotChgRaw<0&&futChgRaw>0);
   const alignEl=document.getElementById('ofi-align');
-  if(aligned&&spotDir==='RISING'){alignEl.className='ofi-align bull';alignEl.textContent='ALIGNED BULLISH';}
-  else if(aligned&&spotDir==='FALLING'){alignEl.className='ofi-align bear';alignEl.textContent='ALIGNED BEARISH';}
+  if(dirAligned&&chgAligned&&spotDir==='RISING'){alignEl.className='ofi-align bull';alignEl.textContent='ALIGNED BULLISH';}
+  else if(dirAligned&&chgAligned&&spotDir==='FALLING'){alignEl.className='ofi-align bear';alignEl.textContent='ALIGNED BEARISH';}
+  else if(chgConflict){alignEl.className='ofi-align conflict';alignEl.textContent='DIVERGING';}
+  else if(dirAligned&&spotDir==='RISING'){alignEl.className='ofi-align bull';alignEl.textContent='WEAK ALIGNED BULL';}
+  else if(dirAligned&&spotDir==='FALLING'){alignEl.className='ofi-align bear';alignEl.textContent='WEAK ALIGNED BEAR';}
   else{alignEl.className='ofi-align conflict';alignEl.textContent='DIVERGING';}
 
   // 2. Spot CVD value + change + status + bar
