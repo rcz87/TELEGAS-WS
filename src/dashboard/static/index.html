@@ -1948,16 +1948,23 @@ function updateMoneyFlow(d){
   mxEl.textContent=matrix;mxEl.className='mf-box-val '+matrixCls;
   document.getElementById('mf-oi-sub').textContent=`OI ${oiChg>=0?'+':''}${oiChg.toFixed(2)}% | Price ${priceChg>=0?'+':''}${priceChg.toFixed(2)}%`;
 
-  // CVD Alignment
+  // CVD Alignment — uses both direction AND Δ60m change for accuracy
   const spotDir=d.spot_cvd_dir||'FLAT', futDir=d.fut_cvd_dir||'FLAT';
+  const mfSpotChg=d.spot_cvd_change||0, mfFutChg=d.fut_cvd_change||0;
+  const mfChgConflict=(mfSpotChg>0&&mfFutChg<0)||(mfSpotChg<0&&mfFutChg>0);
+  const mfChgAligned=(mfSpotChg>0&&mfFutChg>0)||(mfSpotChg<0&&mfFutChg<0);
   let cvdAlign='DIVERGENCE',cvdCls='';
-  if(spotDir==='RISING'&&futDir==='RISING'){cvdAlign='ALIGNED BULLISH';cvdCls='pos';}
-  else if(spotDir==='FALLING'&&futDir==='FALLING'){cvdAlign='ALIGNED BEARISH';cvdCls='neg';}
+  if(spotDir==='RISING'&&futDir==='RISING'&&mfChgAligned){cvdAlign='ALIGNED BULLISH';cvdCls='pos';}
+  else if(spotDir==='FALLING'&&futDir==='FALLING'&&mfChgAligned){cvdAlign='ALIGNED BEARISH';cvdCls='neg';}
+  else if(spotDir==='RISING'&&futDir==='RISING'&&mfChgConflict){cvdAlign='WEAK ALIGNED BULL';cvdCls='pos';}
+  else if(spotDir==='FALLING'&&futDir==='FALLING'&&mfChgConflict){cvdAlign='WEAK ALIGNED BEAR';cvdCls='neg';}
   else if(spotDir==='RISING'&&futDir==='FALLING'){cvdAlign='SPOT LEADS (divergence)';cvdCls='';}
   else if(spotDir==='FALLING'&&futDir==='RISING'){cvdAlign='FUT LEADS (divergence)';cvdCls='';}
   const caEl=document.getElementById('mf-cvd-align');
   caEl.textContent=cvdAlign;caEl.className='mf-box-val '+cvdCls;
-  document.getElementById('mf-cvd-sub').textContent=`Spot ${spotDir} / Fut ${futDir}`;
+  const chgArrowS=mfSpotChg>0?'▲':mfSpotChg<0?'▼':'→';
+  const chgArrowF=mfFutChg>0?'▲':mfFutChg<0?'▼':'→';
+  document.getElementById('mf-cvd-sub').textContent=`Spot ${spotDir} ${chgArrowS}${fc(mfSpotChg)} / Fut ${futDir} ${chgArrowF}${fc(mfFutChg)}`;
 
   // Orderbook Pressure
   const obBid=d.ob_bid||0, obAsk=d.ob_ask||0, obTotal=obBid+obAsk||1;
@@ -2075,7 +2082,7 @@ function updateMoneyFlow(d){
 
   // Entry Checklist (Rule 15)
   const checks=[
-    {label:'CVD ALIGNED',pass:cvdAlign.includes('ALIGNED'),desc:'SpotCVD+FutCVD same direction'},
+    {label:'CVD ALIGNED',pass:cvdAlign.includes('ALIGNED')&&!cvdAlign.includes('WEAK'),warn:cvdAlign.includes('WEAK'),desc:'SpotCVD+FutCVD direction+change aligned'},
     {label:'OI CONFIRM',pass:oiChg>0.2||matrix==='MOMENTUM',desc:'OI supporting'},
     {label:'TAKER CONFIRM',pass:Math.abs(tNet)>0&&((tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')),desc:'Taker matches flow'},
     {label:'NOT CHOP',pass:!mktState.includes('CHOP')&&!mktState.includes('TRANSITION'),desc:'Market state tradeable'},
