@@ -120,7 +120,7 @@ class MessageFormatter:
             absorption = sh.get('absorption_volume', 0)
             dir_pct = sh.get('directional_percentage', 0) * 100
             liq_count = sh.get('liquidation_count', 0)
-            lines = [f"\U0001f514 *Trigger: STOP\_HUNT* | {direction}"]
+            lines = [f"\U0001f514 Trigger: STOP HUNT | {direction}"]
             lines.append(f"Liquidasi: {self._fmt_large_usd(vol)} ({liq_count} events, {dir_pct:.0f}% one-sided)")
             lines.append(f"Absorpsi : {self._fmt_large_usd(absorption)}" + (" \u2705" if absorption > 0 else " \u274c"))
             return "\n".join(lines)

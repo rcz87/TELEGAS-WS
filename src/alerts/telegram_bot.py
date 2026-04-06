@@ -96,6 +96,16 @@ class TelegramBot:
                     return True
                 else:
                     error_text = await response.text()
+                    # Fallback: if Markdown parsing fails, retry without parse_mode
+                    if response.status == 400 and "parse entities" in error_text and parse_mode:
+                        self.logger.warning(f"⚠️ Markdown parse failed, retrying as plain text")
+                        plain_payload = {"chat_id": self.chat_id, "text": message}
+                        async with self._session.post(self.api_url, json=plain_payload) as r2:
+                            if r2.status == 200:
+                                self._messages_sent += 1
+                                self._last_send_time = datetime.now()
+                                self.logger.info(f"✅ Message sent (plain text fallback)")
+                                return True
                     self.logger.error(f"❌ Send failed: {response.status} - {error_text}")
                     self._messages_failed += 1
                     return False
