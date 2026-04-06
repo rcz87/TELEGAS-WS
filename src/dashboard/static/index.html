@@ -1688,38 +1688,50 @@ function computeAdaptiveScore(d,regime,regimeConf){
   const netScore=longRaw-shortRaw;
   let bias=netScore>3?'LONG':netScore<-3?'SHORT':'NEUTRAL';
 
-  // ── Confidence ──
-  let confidence=Math.min(95,Math.round(35+Math.abs(netScore)+regimeConf*0.25));
+  // ── Confidence (sigmoid-inspired curve) ──
+  // Inputs: netScore (0-70 typical), regimeConf (0-95), alignment bonuses
+  const alignBonus=(spotDir===futDir&&spotDir!=='FLAT')?8:0;
+  const chgBonus=((d.spot_cvd_change||0)>0&&(d.fut_cvd_change||0)>0)||((d.spot_cvd_change||0)<0&&(d.fut_cvd_change||0)<0)?5:0;
+  const rawConf=Math.abs(netScore)*1.2+regimeConf*0.35+alignBonus+chgBonus;
+  // Sigmoid mapping: rawConf 0→30, 30→55, 50→70, 70→82, 90→90, 110+→95
+  let confidence=Math.round(95/(1+Math.exp(-0.06*(rawConf-50))))+2;
+  confidence=Math.max(20,Math.min(95,confidence));
 
   // ── Grade ──
   let grade;
-  if(confidence>=75)grade='A';
-  else if(confidence>=60)grade='B';
+  if(confidence>=78)grade='A';
+  else if(confidence>=62)grade='B';
   else if(confidence>=45)grade='C';
   else grade='D';
 
-  // ══ VETO RULES ══
-  let vetoed=false,vetoReason='';
+  // ══ VETO RULES — require 2+ contradictions to veto (single outlier = tolerate) ══
+  let vetoCount=0,vetoReasons=[];
 
-  if(regime==='ACCUMULATION'&&grade==='A'){
-    if(oiChg>3){vetoed=true;vetoReason='OI spike too fast for accumulation';}
-    if(chg24>5){vetoed=true;vetoReason='Price already extended — not accumulation';}
-    if(frAbs>0.03){vetoed=true;vetoReason='Funding too extreme for accumulation';}
+  if(regime==='ACCUMULATION'&&(grade==='A'||grade==='B')){
+    if(oiChg>5){vetoCount++;vetoReasons.push('OI spike >5% — too aggressive for accumulation');}
+    if(Math.abs(chg24)>6){vetoCount++;vetoReasons.push('Price moved >6% — extended, not accumulation');}
+    if(frAbs>0.05){vetoCount++;vetoReasons.push('Funding extreme — crowded positioning');}
+    if(spotDir==='FALLING'&&futDir==='FALLING'){vetoCount++;vetoReasons.push('Both CVDs falling — contradicts accumulation');}
   }
-  if(regime==='DISTRIBUTION'&&grade==='A'){
-    if(spotDir==='RISING'&&Math.abs(spotSlope)>0.2){vetoed=true;vetoReason='Spot recovering strongly';}
-    if(oiChg>0.5){vetoed=true;vetoReason='OI not supporting distribution';}
+  if(regime==='DISTRIBUTION'&&(grade==='A'||grade==='B')){
+    if(spotDir==='RISING'&&futDir==='RISING'){vetoCount++;vetoReasons.push('Both CVDs rising — contradicts distribution');}
+    if(oiChg>1){vetoCount++;vetoReasons.push('OI rising >1% — new money entering, not distributing');}
+    if(obRatio>0.6){vetoCount++;vetoReasons.push('Bid dominant >60% — buy pressure contradicts');}
   }
-  if(regime==='LIQUIDATION'&&grade==='A'){
-    if(oiChg>-0.1&&oiChg<0.1){vetoed=true;vetoReason='OI stabilizing — liquidation may be over';}
-    if(chg24>8){vetoed=true;vetoReason='Price already flushed far — late entry';}
+  if(regime==='LIQUIDATION'&&(grade==='A'||grade==='B')){
+    if(oiChg>0&&oiChg<0.2){vetoCount++;vetoReasons.push('OI stabilizing — liquidation may be over');}
+    if(Math.abs(chg24)>10){vetoCount++;vetoReasons.push('Price flushed >10% — late entry risk');}
+    if(spotDir==='RISING'&&futDir==='RISING'){vetoCount++;vetoReasons.push('CVDs recovering — reversal forming');}
   }
-  if(regime==='SQUEEZE'&&grade==='A'){
-    if(frAbs<0.005){vetoed=true;vetoReason='Funding not extreme enough for squeeze';}
-    if(longS<30&&shortS<30){vetoed=true;vetoReason='No clear crowded side';}
+  if(regime==='SQUEEZE'&&(grade==='A'||grade==='B')){
+    if(frAbs<0.005){vetoCount++;vetoReasons.push('Funding not extreme enough for squeeze');}
+    if(longS<25&&shortS<25){vetoCount++;vetoReasons.push('No crowded side detected');}
+    if(oiChg<-0.5){vetoCount++;vetoReasons.push('OI declining — no fuel for squeeze');}
   }
 
-  if(vetoed){grade='B';confidence=Math.min(confidence,65);}
+  const vetoed=vetoCount>=2;
+  const vetoReason=vetoReasons.join(' | ');
+  if(vetoed){grade=grade==='A'?'B':'C';confidence=Math.min(confidence,62);}
 
   // ── Status ──
   let status;
@@ -1728,10 +1740,10 @@ function computeAdaptiveScore(d,regime,regimeConf){
   else if(grade==='C')status='WAIT';
   else status='AVOID';
 
-  // Range always conservative
+  // Range = no edge, always WAIT or AVOID
   if(regime==='RANGE'){
-    if(grade==='A'){grade='B';status='WATCH';}
-    if(bias!=='NEUTRAL')confidence=Math.min(confidence,55);
+    if(grade==='A'||grade==='B'){grade='C';status='WAIT';}
+    confidence=Math.min(confidence,50);
   }
 
   // ── Phase note ──
@@ -1751,7 +1763,8 @@ function computeAdaptiveScore(d,regime,regimeConf){
     note='Market choppy — CVD conflicting, OI flat. No clear edge. <span class="key">Wait for regime shift.</span>';
   }
 
-  if(vetoed)note+=` <span class="key">VETO: ${vetoReason}</span>`;
+  if(vetoed)note+=` <span class="key">VETO (${vetoCount} flags): ${vetoReason}</span>`;
+  else if(vetoCount===1)note+=` <span style="color:var(--yellow)">⚠ ${vetoReasons[0]}</span>`;
 
   // ── Trigger & Invalidation per regime ──
   let trigger='',invalidation='';
