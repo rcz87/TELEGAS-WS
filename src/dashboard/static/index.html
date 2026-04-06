@@ -2129,6 +2129,11 @@ function selectCoin(coin){
   document.querySelectorAll('.pill').forEach(b=>b.classList.toggle('active',b.dataset.coin===rightCoin));
   document.getElementById('coin-search').value='';
   document.getElementById('coin-dropdown').classList.remove('open');
+  // Clear previous AI analysis
+  const aiResult=document.getElementById('ai-result');
+  if(aiResult){aiResult.style.display='none';aiResult.innerHTML='';}
+  const aiStatus=document.getElementById('ai-status');
+  if(aiStatus)aiStatus.textContent='';
   if(lastState)render(lastState);
   updateChart(rightCoin);
   requestCoinData(rightCoin);
