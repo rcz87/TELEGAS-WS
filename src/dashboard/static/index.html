@@ -373,17 +373,18 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 
 .reg-right{text-align:right;}
 .reg-grade{font-size:36px;font-weight:bold;line-height:1;transition:color .4s;}
-.reg-grade.g-a{color:var(--green);}
+.reg-grade.g-a{color:var(--green);text-shadow:0 0 12px rgba(52,211,153,0.5);font-size:42px;}
 .reg-grade.g-b{color:var(--blue);}
 .reg-grade.g-c{color:var(--yellow);}
-.reg-grade.g-d{color:var(--red);}
+.reg-grade.g-d{color:var(--red);opacity:0.6;}
 
 .reg-mid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;}
 .reg-metric{background:var(--bg);border-radius:5px;padding:6px 8px;text-align:center;}
 .reg-metric-label{font-size:8px;color:var(--text4);text-transform:uppercase;letter-spacing:.3px;}
 .reg-metric-val{font-size:14px;font-weight:bold;margin-top:1px;transition:color .4s;}
 .reg-status-badge{font-size:10px;padding:3px 10px;border-radius:10px;font-weight:bold;display:inline-block;}
-.reg-status-badge.s-ready{background:var(--green-bg);color:var(--green);border:1px solid #065f46;}
+.reg-status-badge.s-ready{background:var(--green-bg);color:var(--green);border:1px solid #065f46;animation:pulse-ready 2s ease-in-out infinite;}
+@keyframes pulse-ready{0%,100%{box-shadow:0 0 0 0 rgba(52,211,153,0.3);}50%{box-shadow:0 0 8px 3px rgba(52,211,153,0.4);}}
 .reg-status-badge.s-watch{background:var(--blue-bg);color:var(--blue);border:1px solid #1e40af;}
 .reg-status-badge.s-wait{background:var(--yellow-bg);color:var(--yellow);border:1px solid #92400e;}
 .reg-status-badge.s-avoid{background:var(--red-bg);color:var(--red);border:1px solid #991b1b;}
@@ -2162,8 +2163,24 @@ function updateMoneyFlow(d){
 function fmtM(v){const a=Math.abs(v);if(a>=1e9)return'$'+(v/1e9).toFixed(2)+'B';if(a>=1e6)return'$'+(v/1e6).toFixed(2)+'M';if(a>=1e3)return'$'+(v/1e3).toFixed(1)+'K';return'$'+v.toFixed(0);}
 
 let lastRegime='RANGE',lastRegimeResult=null;
+let regimeHistory=[]; // track last N regimes for persistence
 function updateRegimeCard(d){
-  const{regime,conf:regimeConf,scores}=detectRegime(d);
+  let{regime,conf:regimeConf,scores}=detectRegime(d);
+
+  // Regime persistence: require 2 consecutive same detections before switching
+  regimeHistory.push(regime);
+  if(regimeHistory.length>5)regimeHistory.shift();
+  if(regimeHistory.length>=2&&lastRegime!=='RANGE'){
+    const last2=regimeHistory.slice(-2);
+    // If new regime differs from current, only switch if last 2 agree
+    if(regime!==lastRegime&&!(last2[0]===regime&&last2[1]===regime)){
+      regime=lastRegime; // hold current regime
+      // Recalculate with held regime
+      const result=computeAdaptiveScore(d,regime,regimeConf);
+      lastRegime=regime;lastRegimeResult=result;
+    }
+  }
+
   const result=computeAdaptiveScore(d,regime,regimeConf);
   lastRegime=regime;lastRegimeResult=result;
 
@@ -2248,6 +2265,7 @@ function render(state){
 // ── Coin Selection ───────────────────────
 function selectCoin(coin){
   rightCoin=coin;
+  regimeHistory=[]; // reset regime persistence on coin switch
   localStorage.setItem('tg_right_coin',rightCoin);
   document.querySelectorAll('.pill').forEach(b=>b.classList.toggle('active',b.dataset.coin===rightCoin));
   document.getElementById('coin-search').value='';
@@ -2285,14 +2303,22 @@ searchInput.addEventListener('input',()=>{
   const matches=Object.keys(coins).filter(s=>s.includes(q)).sort((a,b)=>{
     const aS=a.startsWith(q)?0:1,bS=b.startsWith(q)?0:1;
     if(aS!==bS)return aS-bS;
-    return Math.max(coins[b].long_score||0,coins[b].short_score||0)-Math.max(coins[a].long_score||0,coins[a].short_score||0);
+    // Sort by regime quality: compute regime for ranking
+    const da=coins[a],db=coins[b];
+    const ra=detectRegime(da),rb=detectRegime(db);
+    const sa=computeAdaptiveScore(da,ra.regime,ra.conf),sb=computeAdaptiveScore(db,rb.regime,rb.conf);
+    const gradeW={A:4,B:3,C:2,D:1,'--':0};
+    const wa=(gradeW[sa.grade]||0)*25+sa.confidence,wb=(gradeW[sb.grade]||0)*25+sb.confidence;
+    return wb-wa;
   }).slice(0,10);
   if(!matches.length){searchDrop.classList.remove('open');return;}
   searchDrop.innerHTML=matches.map(sym=>{
-    const d=coins[sym];const score=Math.max(d.long_score||0,d.short_score||0);
-    const scoreCls=d.bias==='LONG'?'pos':d.bias==='SHORT'?'neg':'';
+    const d=coins[sym];
+    const r=detectRegime(d),s=computeAdaptiveScore(d,r.regime,r.conf);
+    const scoreCls=s.bias==='LONG'?'pos':s.bias==='SHORT'?'neg':'';
     const chgCls=(d.change_24h||0)>=0?'pos':'neg';
-    return`<div class="search-item" data-coin="${sym}"><span class="si-coin">${sym}</span><span class="si-price ${chgCls}">${fp(d.price)} ${(d.change_24h||0)>=0?'+':''}${(d.change_24h||0).toFixed(1)}%</span><span class="si-score ${scoreCls}">${d.bias} ${score.toFixed(0)}%</span></div>`;
+    const statusBadge=s.status==='READY'?'<span style="color:var(--green);font-size:8px;font-weight:bold"> ●</span>':s.status==='WATCH'?'<span style="color:var(--yellow);font-size:8px"> ○</span>':'';
+    return`<div class="search-item" data-coin="${sym}"><span class="si-coin">${sym}${statusBadge}</span><span class="si-price ${chgCls}">${fp(d.price)} ${(d.change_24h||0)>=0?'+':''}${(d.change_24h||0).toFixed(1)}%</span><span class="si-score ${scoreCls}">${s.grade} ${s.bias} ${s.confidence}%</span></div>`;
   }).join('');
   searchDrop.classList.add('open');
   searchDrop.querySelectorAll('.search-item').forEach(item=>{item.onclick=()=>selectCoin(item.dataset.coin);});
