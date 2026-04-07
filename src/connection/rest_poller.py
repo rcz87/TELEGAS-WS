@@ -123,8 +123,9 @@ class CVDSnapshot:
     """Cumulative Volume Delta snapshot (spot or futures)"""
     symbol: str           # "BTC"
     market: str           # "spot" or "futures"
-    cvd_values: list      # Last N CVD values (floats)
-    cvd_latest: float     # Most recent value
+    cvd_values: list      # Last N CVD values (floats) — per-candle deltas
+    cvd_latest: float     # Most recent candle's delta (for per-bar view)
+    cvd_cumulative: float # Sum of all candles (running total, matches CoinGlass chart)
     cvd_change: float     # Net change over window: cvd_values[-1] - cvd_values[0]
     cvd_slope: float      # Linear regression slope (normalized)
     cvd_direction: str    # "RISING" / "FALLING" / "FLAT"
@@ -726,12 +727,15 @@ class CoinGlassRestPoller:
             # Net change over window
             cvd_change = (cvd_values[-1] - cvd_values[0]) if len(cvd_values) >= 2 else 0.0
 
+            cvd_cumulative = sum(cvd_values)
+
             self._stats["spot_cvd_fetches"] += 1
             return CVDSnapshot(
                 symbol=symbol,
                 market="spot",
                 cvd_values=cvd_values,
                 cvd_latest=cvd_values[-1] if cvd_values else 0.0,
+                cvd_cumulative=cvd_cumulative,
                 cvd_change=cvd_change,
                 cvd_slope=slope,
                 cvd_direction=direction,
@@ -785,12 +789,15 @@ class CoinGlassRestPoller:
             # Net change over window
             cvd_change = (cvd_values[-1] - cvd_values[0]) if len(cvd_values) >= 2 else 0.0
 
+            cvd_cumulative = sum(cvd_values)
+
             self._stats["futures_cvd_fetches"] += 1
             return CVDSnapshot(
                 symbol=symbol,
                 market="futures",
                 cvd_values=cvd_values,
                 cvd_latest=cvd_values[-1] if cvd_values else 0.0,
+                cvd_cumulative=cvd_cumulative,
                 cvd_change=cvd_change,
                 cvd_slope=slope,
                 cvd_direction=direction,

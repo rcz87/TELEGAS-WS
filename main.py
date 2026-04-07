@@ -915,15 +915,17 @@ class TeleglasPro:
                     spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
                     fut_cvd = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
 
-                    # CVD VETO: both spot AND futures must not oppose signal direction
-                    if spot_cvd and signal.direction == "LONG" and spot_cvd.cvd_latest < 0:
-                        if not fut_cvd or fut_cvd.cvd_latest < 0:
+                    # CVD VETO: both spot AND futures cumulative must not oppose signal direction
+                    spot_cum = getattr(spot_cvd, 'cvd_cumulative', spot_cvd.cvd_latest) if spot_cvd else 0
+                    fut_cum = getattr(fut_cvd, 'cvd_cumulative', fut_cvd.cvd_latest) if fut_cvd else 0
+                    if spot_cvd and signal.direction == "LONG" and spot_cum < 0:
+                        if not fut_cvd or fut_cum < 0:
                             send_telegram = False
-                            self.logger.info(f"CVD VETO {symbol}: LONG blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
-                    elif spot_cvd and signal.direction == "SHORT" and spot_cvd.cvd_latest > 0:
-                        if not fut_cvd or fut_cvd.cvd_latest > 0:
+                            self.logger.info(f"CVD VETO {symbol}: LONG blocked (SpotCVD {spot_cum:,.0f})")
+                    elif spot_cvd and signal.direction == "SHORT" and spot_cum > 0:
+                        if not fut_cvd or fut_cum > 0:
                             send_telegram = False
-                            self.logger.info(f"CVD VETO {symbol}: SHORT blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
+                            self.logger.info(f"CVD VETO {symbol}: SHORT blocked (SpotCVD {spot_cum:,.0f})")
 
                     # Funding rate sanity: don't long when funding extremely positive (crowded longs)
                     if send_telegram:
@@ -982,11 +984,13 @@ class TeleglasPro:
                         lines.append("")
                         lines.append("ORDER FLOW")
                         if spot_cvd_snap:
+                            spot_cum = getattr(spot_cvd_snap, 'cvd_cumulative', spot_cvd_snap.cvd_latest)
                             chg_arrow = "\u25b2" if spot_cvd_snap.cvd_change > 0 else "\u25bc" if spot_cvd_snap.cvd_change < 0 else "\u2192"
-                            lines.append(f"SpotCVD : {spot_cvd_snap.cvd_latest:+,.0f} | \u039460m: {chg_arrow}{spot_cvd_snap.cvd_change:+,.0f} | {spot_cvd_snap.cvd_direction}")
+                            lines.append(f"SpotCVD : {spot_cum:+,.0f} | \u039460m: {chg_arrow}{spot_cvd_snap.cvd_change:+,.0f} | {spot_cvd_snap.cvd_direction}")
                         if fut_cvd_snap:
+                            fut_cum = getattr(fut_cvd_snap, 'cvd_cumulative', fut_cvd_snap.cvd_latest)
                             chg_arrow = "\u25b2" if fut_cvd_snap.cvd_change > 0 else "\u25bc" if fut_cvd_snap.cvd_change < 0 else "\u2192"
-                            lines.append(f"FutCVD  : {fut_cvd_snap.cvd_latest:+,.0f} | \u039460m: {chg_arrow}{fut_cvd_snap.cvd_change:+,.0f} | {fut_cvd_snap.cvd_direction}")
+                            lines.append(f"FutCVD  : {fut_cum:+,.0f} | \u039460m: {chg_arrow}{fut_cvd_snap.cvd_change:+,.0f} | {fut_cvd_snap.cvd_direction}")
                         if oi_snap:
                             lines.append(f"OI      : ${oi_snap.current_oi_usd:,.0f} {oi_snap.oi_change_pct:+.1f}% 1h")
                         if ob_snap:
@@ -1716,9 +1720,9 @@ class TeleglasPro:
                 spot_hist = self.market_context_buffer.get_spot_cvd_history(base_symbol, 10)
                 fut_hist = self.market_context_buffer.get_futures_cvd_history(base_symbol, 10)
 
-                # Get current values
-                spot_val = spot_hist[-1].cvd_latest if spot_hist else None
-                fut_val = fut_hist[-1].cvd_latest if fut_hist else None
+                # Get current cumulative values for sparkline
+                spot_val = getattr(spot_hist[-1], 'cvd_cumulative', spot_hist[-1].cvd_latest) if spot_hist else None
+                fut_val = getattr(fut_hist[-1], 'cvd_cumulative', fut_hist[-1].cvd_latest) if fut_hist else None
 
                 # Load existing history from previous state, append new value
                 prev = existing_coins.get(base_symbol, {})
@@ -1789,11 +1793,13 @@ class TeleglasPro:
                     "taker_buy_vol": taker_buy,
                     "taker_sell_vol": taker_sell,
                     "spot_cvd": ctx.get('spot_cvd_latest', 0),
+                    "spot_cvd_candle": ctx.get('spot_cvd_candle', 0),
                     "spot_cvd_change": ctx.get('spot_cvd_change', 0),
                     "spot_cvd_dir": ctx.get('spot_cvd_direction', 'UNKNOWN'),
                     "spot_cvd_slope": ctx.get('spot_cvd_slope', 0),
                     "spot_cvd_spark": spot_spark,
                     "fut_cvd": ctx.get('futures_cvd_latest', 0),
+                    "fut_cvd_candle": ctx.get('futures_cvd_candle', 0),
                     "fut_cvd_change": ctx.get('futures_cvd_change', 0),
                     "fut_cvd_dir": ctx.get('futures_cvd_direction', 'UNKNOWN'),
                     "fut_cvd_slope": ctx.get('futures_cvd_slope', 0),
@@ -1872,14 +1878,16 @@ class TeleglasPro:
         spot = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
         if spot:
             ctx['spot_cvd_direction'] = spot.cvd_direction
-            ctx['spot_cvd_latest'] = spot.cvd_latest
+            ctx['spot_cvd_latest'] = getattr(spot, 'cvd_cumulative', spot.cvd_latest)
+            ctx['spot_cvd_candle'] = spot.cvd_latest
             ctx['spot_cvd_change'] = spot.cvd_change
             ctx['spot_cvd_slope'] = spot.cvd_slope
 
         fut = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
         if fut:
             ctx['futures_cvd_direction'] = fut.cvd_direction
-            ctx['futures_cvd_latest'] = fut.cvd_latest
+            ctx['futures_cvd_latest'] = getattr(fut, 'cvd_cumulative', fut.cvd_latest)
+            ctx['futures_cvd_candle'] = fut.cvd_latest
             ctx['futures_cvd_change'] = fut.cvd_change
             ctx['futures_cvd_slope'] = fut.cvd_slope
 
