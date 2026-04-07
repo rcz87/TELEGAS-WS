@@ -940,7 +940,7 @@ function updateFlowCard(d){
   const spotChg=d.spot_cvd_change||0;
   const spotSt=_cvdStatus(spotDir,spotSlope);
   const spotValEl=document.getElementById('ofi-spot-val');
-  const spotDropping=spotSpark.length>=3&&spotSpark[spotSpark.length-1]<spotSpark[spotSpark.length-3];
+  const spotDropping=spotSpark.length>=3&&spotSpark[spotSpark.length-1]<spotSpark[spotSpark.length-3]&&spotChg<0;
   const spotActualColor=spotVal>=0&&spotDropping?'var(--yellow)':spotColor;
   const spotActualHex=spotVal>=0&&spotDropping?'#fbbf24':spotColorHex;
   spotValEl.textContent=fc(spotVal);spotValEl.style.color=spotActualColor;
@@ -960,7 +960,7 @@ function updateFlowCard(d){
   const futChg=d.fut_cvd_change||0;
   const futSt=_cvdStatus(futDir,futSlope);
   const futValEl=document.getElementById('ofi-fut-val');
-  const futDropping=futSpark.length>=3&&futSpark[futSpark.length-1]<futSpark[futSpark.length-3];
+  const futDropping=futSpark.length>=3&&futSpark[futSpark.length-1]<futSpark[futSpark.length-3]&&futChg<0;
   const futActualColor=futVal>=0&&futDropping?'var(--yellow)':futColor;
   const futActualHex=futVal>=0&&futDropping?'#fbbf24':futColorHex;
   futValEl.textContent=fc(futVal);futValEl.style.color=futActualColor;
