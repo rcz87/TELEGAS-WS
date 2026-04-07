@@ -919,6 +919,9 @@ function updateFlowCard(d){
   const spotColorHex=spotVal>=0?'#34d399':'#f87171';
   const futColorHex=futVal>=0?'#34d399':'#f87171';
 
+  // Sparkline data (needed for rapid change detection + color override)
+  const spotSpark=d.spot_cvd_spark||[], futSpark=d.fut_cvd_spark||[];
+
   // 1. Alignment badge — uses both direction AND Δ60m change for accuracy
   const spotChgRaw=d.spot_cvd_change||0, futChgRaw=d.fut_cvd_change||0;
   const dirAligned=spotDir===futDir&&spotDir!=='FLAT';
@@ -973,7 +976,6 @@ function updateFlowCard(d){
   futBar.style.background=futActualHex;futBar.style.opacity='0.5';
 
   // 3b. Rapid change detection from sparkline (last 3 bars)
-  const spotSpark=d.spot_cvd_spark||[], futSpark=d.fut_cvd_spark||[];
   let rapidAlert='', rapidCls='';
   function detectRapidChange(spark, label){
     if(spark.length<3)return null;
@@ -2318,6 +2320,7 @@ function updateRegimeCard(d){
 
 // ── Main Render ──────────────────────────
 function render(state){
+  try{
   lastState=state;
   lastDataTime=Date.now();
   document.getElementById('ts').textContent=state.timestamp||'--';
@@ -2337,6 +2340,7 @@ function render(state){
   try{document.getElementById('card-cvd').innerHTML=buildCvdCard(d);}catch(e){console.error('CvdCard error:',e);}
   try{document.getElementById('fr-ext-card').innerHTML=buildFrExtCard(state);}catch(e){console.error('FrExtCard error:',e);}
   try{document.getElementById('whale-list').innerHTML=buildWhales(ws3Data.whale_alerts||state.whale_alerts);}catch(e){console.error('Whales error:',e);}
+  }catch(renderErr){console.error('RENDER CRASH:',renderErr);}
 }
 
 // ── Coin Selection ───────────────────────
@@ -2434,7 +2438,7 @@ function connect(){
           }
         }
       }else{render(msg);}
-    }catch(x){}
+    }catch(x){console.error('WS render error:',x);}
   };
   ws.onclose=()=>{setStatus('RECONNECTING');if(!reconnectTimer)reconnectTimer=setInterval(connect,3000);};
   ws.onerror=()=>ws.close();

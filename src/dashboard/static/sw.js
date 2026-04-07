@@ -1,4 +1,4 @@
-const CACHE = 'teleglas-v1';
+const CACHE = 'teleglas-v2';
 const STATIC = [
   '/dashboard/',
   '/dashboard/static/manifest.json',
