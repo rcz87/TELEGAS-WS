@@ -158,39 +158,44 @@ def _build_cvd_block(spot_cvd_hist: list, fut_cvd_hist: list,
     """
     Build CVD section text and return (text, spot_confirms, fut_confirms).
     direction = "BUY" or "SELL"
+
+    Confirmation requires direction match AND meaningful magnitude.
+    Tiny values (e.g. SpotCVD -26K) don't count as confirmation.
+    Uses cumulative CVD (sum of all candles) for accurate level.
     """
     lines = []
     spot_confirms = False
     fut_confirms = False
 
-    # SpotCVD
+    # SpotCVD — use cumulative for value
     if spot_cvd_hist and len(spot_cvd_hist) >= 2:
         s = spot_cvd_hist[-1]
-        spot_val = s.cvd_latest
+        spot_val = getattr(s, 'cvd_cumulative', s.cvd_latest)
         spot_dir = s.cvd_direction
         spot_deltas = _cvd_deltas(spot_cvd_hist)
         spot_consec = _consecutive_candles(spot_deltas, direction)
         spot_sign = "POSITIF" if spot_val >= 0 else "NEGATIF"
         lines.append(f"SpotCVD : {_fmts(spot_val)} ({spot_sign}) {spot_dir} | {spot_consec} candle {direction.lower()}")
-        if direction == "SELL" and (spot_dir == "FALLING" or spot_val < 0):
+        # Must have direction match AND meaningful value (>$50K)
+        if direction == "SELL" and spot_dir == "FALLING" and spot_val < -50_000:
             spot_confirms = True
-        elif direction == "BUY" and (spot_dir == "RISING" or spot_val > 0):
+        elif direction == "BUY" and spot_dir == "RISING" and spot_val > 50_000:
             spot_confirms = True
     else:
         lines.append("SpotCVD : N/A (data belum tersedia)")
 
-    # FutCVD
+    # FutCVD — use cumulative for value
     if fut_cvd_hist and len(fut_cvd_hist) >= 2:
         f = fut_cvd_hist[-1]
-        fut_val = f.cvd_latest
+        fut_val = getattr(f, 'cvd_cumulative', f.cvd_latest)
         fut_dir = f.cvd_direction
         fut_deltas = _cvd_deltas(fut_cvd_hist)
         fut_consec = _consecutive_candles(fut_deltas, direction)
         fut_sign = "POSITIF" if fut_val >= 0 else "NEGATIF"
         lines.append(f"FutCVD  : {_fmts(fut_val)} ({fut_sign}) {fut_dir} | {fut_consec} candle {direction.lower()}")
-        if direction == "SELL" and (fut_dir == "FALLING" or fut_val < 0):
+        if direction == "SELL" and fut_dir == "FALLING" and fut_val < -50_000:
             fut_confirms = True
-        elif direction == "BUY" and (fut_dir == "RISING" or fut_val > 0):
+        elif direction == "BUY" and fut_dir == "RISING" and fut_val > 50_000:
             fut_confirms = True
     else:
         lines.append("FutCVD  : N/A")
@@ -378,12 +383,26 @@ class MovementDetector:
             spot_cvd_hist, fut_cvd_hist, direction)
         oi_label, oi_pct = _oi_state(oi_hist)
 
-        # Grade
+        # Grade — requires minimum absolute flow for Grade A
+        # Relative spike alone (8x baseline) not enough if absolute flow is tiny
+        min_abs_for_a = th["cvd_spike"] / 3  # e.g. BTC=$16.7M, SOL=$1.7M, default=$667K
         conditions = sum([spot_ok, fut_ok, oi_label == "NAIK" if direction == "BUY" else oi_label == "TURUN"])
-        grade = "A" if conditions >= 2 else "B" if conditions >= 1 else "C"
+        has_min_abs_flow = abs(recent_sum) >= min_abs_for_a
+        grade = "A" if conditions >= 2 and has_min_abs_flow else "B" if conditions >= 1 else "C"
 
         if grade == "C":
             return None  # Don't send Grade C
+
+        # Volume context for alert
+        vol_label = ""
+        if abs(recent_sum) >= 10_000_000:
+            vol_label = "VERY HIGH"
+        elif abs(recent_sum) >= 1_000_000:
+            vol_label = "HIGH"
+        elif abs(recent_sum) >= 200_000:
+            vol_label = "MODERATE"
+        else:
+            vol_label = "LOW"
 
         self._set_cooldown(coin, "QUIET_TO_MOVE")
 
@@ -394,7 +413,7 @@ class MovementDetector:
             f"Trigger: QUIET > MOVE | {d_label}\n"
             f"\n"
             f"FLOW:\n"
-            f"FutCVD spike: {_fmts(recent_sum)} (15 menit)\n"
+            f"FutCVD spike: {_fmts(recent_sum)} (15 menit) [{vol_label}]\n"
             f"Baseline: {_fmt(baseline_avg_abs)}/candle\n"
             f"Spike: {recent_avg_abs / min_baseline_ref:.1f}x dari baseline\n"
             f"\n"
@@ -709,9 +728,13 @@ class MovementDetector:
                     oi_interp = "longs masuk fresh (bullish)" if oi_label == "NAIK" else \
                                 "shorts covering" if oi_label == "TURUN" else ""
 
-                # Grade: A = spot+fut+taker, B = fut+taker, C = taker only
+                # Grade: A = spot+fut confirm + meaningful flow, B = partial, C = none
                 conditions = sum([spot_ok, fut_ok])
-                grade = "A" if conditions == 2 else "B" if conditions == 1 else "C"
+                net_flow = total_buy - total_sell
+                th_s = self._thresholds(coin)
+                min_abs_stealth = th_s["cvd_spike"] / 5  # minimum absolute flow for Grade A
+                has_abs_flow = abs(net_flow) >= min_abs_stealth
+                grade = "A" if conditions == 2 and has_abs_flow else "B" if conditions >= 1 else "C"
 
                 if grade == "C":
                     # Don't send Grade C, but still track direction
@@ -727,6 +750,11 @@ class MovementDetector:
                     self._last_stealth_direction[coin] = current_side
                     self._last_stealth_time[coin] = time.time()
 
+                    # Volume context
+                    sv_label = "VERY HIGH" if abs(net_flow) >= 10_000_000 else \
+                               "HIGH" if abs(net_flow) >= 1_000_000 else \
+                               "MODERATE" if abs(net_flow) >= 200_000 else "LOW"
+
                     msg = (
                         f"{coin} — STEALTH {current_side} DETECTED | ${p_last:,.2f} | {time_str} WIB\n"
                         f"\n"
@@ -736,7 +764,7 @@ class MovementDetector:
                         f"FLOW:\n"
                         f"{'Sell' if current_side == 'SELL' else 'Buy'}: {_fmt(total_sell if current_side == 'SELL' else total_buy)}"
                         f" | {'Buy' if current_side == 'SELL' else 'Sell'}: {_fmt(total_buy if current_side == 'SELL' else total_sell)}"
-                        f" | Net: {_fmts(net_flow)} ({dom_pct:.0f}% {current_side.lower()})\n"
+                        f" | Net: {_fmts(net_flow)} [{sv_label}] ({dom_pct:.0f}% {current_side.lower()})\n"
                         f"Candle {current_side.lower()} berturut: {consec}x\n"
                         f"Harga: ${p_last:,.2f} (FLAT {price_change_pct:+.1f}%)\n"
                         f"\n"
