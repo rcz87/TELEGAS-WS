@@ -908,17 +908,38 @@ class TeleglasPro:
                     f"conf={signal.confidence:.0f}% sources={signal.sources}"
                 )
 
-                # Telegram gate: confidence + active coin + CVD veto + dedup
-                send_telegram = signal.confidence >= 70 and self._is_coin_active(symbol)
+                # Telegram gate: confidence + active coin + CVD veto + funding check
+                send_telegram = signal.confidence >= 72 and self._is_coin_active(symbol)
 
                 if send_telegram:
                     spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
+                    fut_cvd = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
+
+                    # CVD VETO: both spot AND futures must not oppose signal direction
                     if spot_cvd and signal.direction == "LONG" and spot_cvd.cvd_latest < 0:
-                        send_telegram = False
-                        self.logger.info(f"CVD VETO {symbol}: LONG blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
+                        if not fut_cvd or fut_cvd.cvd_latest < 0:
+                            send_telegram = False
+                            self.logger.info(f"CVD VETO {symbol}: LONG blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
                     elif spot_cvd and signal.direction == "SHORT" and spot_cvd.cvd_latest > 0:
-                        send_telegram = False
-                        self.logger.info(f"CVD VETO {symbol}: SHORT blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
+                        if not fut_cvd or fut_cvd.cvd_latest > 0:
+                            send_telegram = False
+                            self.logger.info(f"CVD VETO {symbol}: SHORT blocked (SpotCVD {spot_cvd.cvd_latest:,.0f})")
+
+                    # Funding rate sanity: don't long when funding extremely positive (crowded longs)
+                    if send_telegram:
+                        fpe = self.market_context_buffer.get_funding_per_exchange(base_symbol)
+                        if fpe and fpe.rates:
+                            sane = [v for v in fpe.rates.values() if abs(v) < 0.01]
+                            avg_fr = sum(sane) / len(sane) if sane else 0
+                            if signal.direction == "LONG" and avg_fr > 0.0005:
+                                signal.confidence = max(55, signal.confidence - 8)
+                                self.logger.info(f"FR PENALTY {symbol}: LONG -8 (avg FR {avg_fr*100:+.4f}%)")
+                            elif signal.direction == "SHORT" and avg_fr < -0.0005:
+                                signal.confidence = max(55, signal.confidence - 8)
+                                self.logger.info(f"FR PENALTY {symbol}: SHORT -8 (avg FR {avg_fr*100:+.4f}%)")
+                        # Re-check confidence after penalty
+                        if signal.confidence < 72:
+                            send_telegram = False
 
                 if send_telegram:
                     try:

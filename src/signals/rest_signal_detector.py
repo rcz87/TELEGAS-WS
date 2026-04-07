@@ -262,11 +262,60 @@ class RestSignalDetector:
             return None
 
         direction = "LONG" if net_long > net_short else "SHORT"
-        confidence = min(85, round(50 + dominance * 40))
+
+        # Dynamic confidence based on multiple factors (not fixed 85)
+        confidence = 50.0
+
+        # 1. Dominance: 65%→+5, 80%→+10, 95%→+15
+        confidence += min(15, (dominance - 0.6) * 37.5)
+
+        # 2. Size: >$2M→+5, >$5M→+10, >$10M→+15
+        dominant_flow = max(net_long, net_short)
+        if dominant_flow >= 10_000_000:
+            confidence += 15
+        elif dominant_flow >= 5_000_000:
+            confidence += 10
+        elif dominant_flow >= 2_000_000:
+            confidence += 5
+
+        # 3. Whale count: multiple whales same direction = stronger
+        if count >= 5:
+            confidence += 8
+        elif count >= 3:
+            confidence += 5
+        elif count >= 2:
+            confidence += 2
+
+        # 4. CVD alignment: whale + flow = strong, whale vs flow = weak
+        spot_cvd = self.buffer.get_latest_spot_cvd(symbol)
+        cvd_aligned = False
+        cvd_opposing = False
+        if spot_cvd:
+            if direction == "LONG" and spot_cvd.cvd_direction == "RISING":
+                cvd_aligned = True
+                confidence += 8
+            elif direction == "SHORT" and spot_cvd.cvd_direction == "FALLING":
+                cvd_aligned = True
+                confidence += 8
+            elif direction == "LONG" and spot_cvd.cvd_direction == "FALLING":
+                cvd_opposing = True
+                confidence -= 12
+            elif direction == "SHORT" and spot_cvd.cvd_direction == "RISING":
+                cvd_opposing = True
+                confidence -= 12
+
+        # 5. OI confirmation: OI rising with whale = positioning, not just hedging
+        oi_snap = self.buffer.get_latest_oi(symbol) if hasattr(self.buffer, 'get_latest_oi') else None
+        if oi_snap and oi_snap.oi_change_pct > 0.5:
+            confidence += 5
+
+        confidence = max(55, min(92, round(confidence)))
 
         self.logger.info(
             f"WHALE {symbol}: {direction} net_long=${net_long:,.0f} "
-            f"net_short=${net_short:,.0f} dominance={dominance:.0%} conf={confidence}"
+            f"net_short=${net_short:,.0f} dominance={dominance:.0%} "
+            f"count={count} cvd={'OK' if cvd_aligned else 'OPPOSE' if cvd_opposing else 'N/A'} "
+            f"conf={confidence}"
         )
 
         return RestSignal(
@@ -275,13 +324,15 @@ class RestSignalDetector:
             direction=direction,
             confidence=confidence,
             sources=["WhaleAlert"],
-            description=f"Whale net {direction} ${max(net_long,net_short):,.0f} ({dominance:.0%} dominant)",
+            description=f"Whale net {direction} ${dominant_flow:,.0f} ({dominance:.0%} dominant, {count} whales)",
             metadata={
                 "net_long_usd": net_long,
                 "net_short_usd": net_short,
                 "total_flow_usd": total_flow,
                 "dominance": dominance,
                 "whale_count": count,
+                "cvd_aligned": cvd_aligned,
+                "cvd_opposing": cvd_opposing,
             },
         )
 
