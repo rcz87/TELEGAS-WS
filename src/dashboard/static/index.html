@@ -265,6 +265,7 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 .pos-tbl td{padding:3px 5px;border-bottom:1px solid var(--bg);}
 .pos-row-critical{animation:critPulse 1.5s infinite;border:1px solid var(--red);border-radius:4px;}
 @keyframes critPulse{0%,100%{border-color:var(--red);}50%{border-color:var(--red-bg);}}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.6;}}
 .crit-badge{font-size:8px;background:var(--red-bg);color:var(--red);padding:1px 4px;border-radius:3px;font-weight:bold;margin-left:3px;}
 .pos-insight{font-size:9px;color:var(--text3);margin-top:5px;padding:5px 8px;background:var(--bg);border-radius:4px;}
 .pos-filter{display:flex;gap:3px;}
@@ -932,43 +933,105 @@ function updateFlowCard(d){
   else{alignEl.className='ofi-align conflict';alignEl.textContent='DIVERGING';}
 
   // 2. Spot CVD value + change + status + bar
+  //    Color override: if cumulative positive but dropping fast → orange warning
   const spotChg=d.spot_cvd_change||0;
   const spotSt=_cvdStatus(spotDir,spotSlope);
   const spotValEl=document.getElementById('ofi-spot-val');
-  spotValEl.textContent=fc(spotVal);spotValEl.style.color=spotColor;
+  const spotDropping=spotSpark.length>=3&&spotSpark[spotSpark.length-1]<spotSpark[spotSpark.length-3];
+  const spotActualColor=spotVal>=0&&spotDropping?'var(--yellow)':spotColor;
+  const spotActualHex=spotVal>=0&&spotDropping?'#fbbf24':spotColorHex;
+  spotValEl.textContent=fc(spotVal);spotValEl.style.color=spotActualColor;
   const spotChgEl=document.getElementById('ofi-spot-change');
   const spotChgArrow=spotChg>0?'\u25b2':spotChg<0?'\u25bc':'\u2192';
   const spotChgCls=spotChg>0?'chg-pos':spotChg<0?'chg-neg':'';
   spotChgEl.innerHTML=`\u039460m: <span class="chg-val ${spotChgCls}">${spotChgArrow}${fc(spotChg)}</span>`;
   const spotStEl=document.getElementById('ofi-spot-status');
-  spotStEl.textContent=spotSt.t;spotStEl.className='ofi-col-status '+spotSt.c;
+  // Override status text if dropping while positive
+  if(spotVal>=0&&spotDropping&&spotDir!=='FALLING'){spotStEl.textContent='DRAINING';spotStEl.className='ofi-col-status neg';}
+  else{spotStEl.textContent=spotSt.t;spotStEl.className='ofi-col-status '+spotSt.c;}
   const spotBar=document.getElementById('ofi-spot-bar');
   spotBar.style.width=Math.min(spotAbs/tier*100,100).toFixed(0)+'%';
-  spotBar.style.background=spotColorHex;spotBar.style.opacity='0.5';
+  spotBar.style.background=spotActualHex;spotBar.style.opacity='0.5';
 
   // 3. Futures CVD value + change + status + bar
   const futChg=d.fut_cvd_change||0;
   const futSt=_cvdStatus(futDir,futSlope);
   const futValEl=document.getElementById('ofi-fut-val');
-  futValEl.textContent=fc(futVal);futValEl.style.color=futColor;
+  const futDropping=futSpark.length>=3&&futSpark[futSpark.length-1]<futSpark[futSpark.length-3];
+  const futActualColor=futVal>=0&&futDropping?'var(--yellow)':futColor;
+  const futActualHex=futVal>=0&&futDropping?'#fbbf24':futColorHex;
+  futValEl.textContent=fc(futVal);futValEl.style.color=futActualColor;
   const futChgEl=document.getElementById('ofi-fut-change');
   const futChgArrow=futChg>0?'\u25b2':futChg<0?'\u25bc':'\u2192';
   const futChgCls=futChg>0?'chg-pos':futChg<0?'chg-neg':'';
   futChgEl.innerHTML=`\u039460m: <span class="chg-val ${futChgCls}">${futChgArrow}${fc(futChg)}</span>`;
   const futStEl=document.getElementById('ofi-fut-status');
-  futStEl.textContent=futSt.t;futStEl.className='ofi-col-status '+futSt.c;
+  if(futVal>=0&&futDropping&&futDir!=='FALLING'){futStEl.textContent='DRAINING';futStEl.className='ofi-col-status neg';}
+  else{futStEl.textContent=futSt.t;futStEl.className='ofi-col-status '+futSt.c;}
   const futBar=document.getElementById('ofi-fut-bar');
   futBar.style.width=Math.min(futAbs/tier*100,100).toFixed(0)+'%';
-  futBar.style.background=futColorHex;futBar.style.opacity='0.5';
+  futBar.style.background=futActualHex;futBar.style.opacity='0.5';
 
-  // 3b. CVD Interpretation
+  // 3b. Rapid change detection from sparkline (last 3 bars)
+  const spotSpark=d.spot_cvd_spark||[], futSpark=d.fut_cvd_spark||[];
+  let rapidAlert='', rapidCls='';
+  function detectRapidChange(spark, label){
+    if(spark.length<3)return null;
+    const last3=spark.slice(-3);
+    const drop=last3[0]-last3[2]; // positive = dropping
+    const rise=last3[2]-last3[0]; // positive = rising
+    const avg=spark.reduce((a,b)=>a+Math.abs(b),0)/spark.length||1;
+    const pctDrop=drop/Math.max(Math.abs(last3[0]),avg)*100;
+    const pctRise=rise/Math.max(Math.abs(last3[0]),avg)*100;
+    if(pctDrop>30)return{dir:'DROP',pct:pctDrop,label};
+    if(pctRise>30)return{dir:'SURGE',pct:pctRise,label};
+    // Also detect sign flip (positive→negative or vice versa)
+    if(last3[0]>0&&last3[2]<0)return{dir:'FLIPPED NEG',pct:100,label};
+    if(last3[0]<0&&last3[2]>0)return{dir:'FLIPPED POS',pct:100,label};
+    return null;
+  }
+  const spotRapid=detectRapidChange(spotSpark,'SpotCVD');
+  const futRapid=detectRapidChange(futSpark,'FutCVD');
+  if(spotRapid&&spotRapid.dir==='FLIPPED NEG'){rapidAlert='\u26a0 SpotCVD FLIPPED NEGATIVE';rapidCls='neg';}
+  else if(spotRapid&&spotRapid.dir==='FLIPPED POS'){rapidAlert='\u26a1 SpotCVD FLIPPED POSITIVE';rapidCls='pos';}
+  else if(spotRapid&&spotRapid.dir==='DROP'){rapidAlert='\u26a0 SpotCVD DROPPING FAST (-'+Math.round(spotRapid.pct)+'%)';rapidCls='neg';}
+  else if(futRapid&&futRapid.dir==='DROP'){rapidAlert='\u26a0 FutCVD DROPPING FAST (-'+Math.round(futRapid.pct)+'%)';rapidCls='neg';}
+  else if(spotRapid&&spotRapid.dir==='SURGE'){rapidAlert='\u26a1 SpotCVD SURGING (+'+Math.round(spotRapid.pct)+'%)';rapidCls='pos';}
+  else if(futRapid&&futRapid.dir==='SURGE'){rapidAlert='\u26a1 FutCVD SURGING (+'+Math.round(futRapid.pct)+'%)';rapidCls='pos';}
+
+  // Show/hide rapid alert
+  let rapidEl=document.getElementById('ofi-rapid-alert');
+  if(!rapidEl){
+    rapidEl=document.createElement('div');rapidEl.id='ofi-rapid-alert';
+    rapidEl.style.cssText='text-align:center;font-weight:700;font-size:11px;padding:4px 8px;border-radius:4px;margin:4px 0;display:none;animation:pulse 1s infinite';
+    const alignEl2=document.getElementById('ofi-align');
+    alignEl2.parentElement.insertBefore(rapidEl,alignEl2.nextSibling);
+  }
+  if(rapidAlert){
+    rapidEl.style.display='block';
+    rapidEl.textContent=rapidAlert;
+    rapidEl.style.background=rapidCls==='neg'?'var(--red-bg)':'var(--green-bg)';
+    rapidEl.style.color=rapidCls==='neg'?'var(--red)':'var(--green)';
+  } else {
+    rapidEl.style.display='none';
+  }
+
+  // 3c. CVD Interpretation — override if rapid change detected
   const interpEl=document.getElementById('ofi-interp');
   const interpBadge=document.getElementById('ofi-interp-badge');
   const interpDesc=document.getElementById('ofi-interp-desc');
   const spotChangeDir=spotChg>0?'pos':spotChg<0?'neg':'flat';
   const futChangeDir=futChg>0?'pos':futChg<0?'neg':'flat';
   let interpLabel='',interpCls='',interpText='';
-  if(spotChangeDir!=='flat'&&futChangeDir!=='flat'&&spotChangeDir!==futChangeDir){
+
+  // Rapid change overrides normal interpretation
+  if(spotRapid&&(spotRapid.dir==='DROP'||spotRapid.dir==='FLIPPED NEG')){
+    interpLabel='CVD REVERSING';interpCls='conflict';
+    interpText='CVD dropping fast — bias may be stale. Wait for stabilization.';
+  } else if(spotRapid&&(spotRapid.dir==='SURGE'||spotRapid.dir==='FLIPPED POS')){
+    interpLabel='CVD SURGING';interpCls='strong-long';
+    interpText='CVD accelerating up — fresh momentum building.';
+  } else if(spotChangeDir!=='flat'&&futChangeDir!=='flat'&&spotChangeDir!==futChangeDir){
     interpLabel='CONFLICT';interpCls='conflict';interpText='Spot & Futures CVD opposing — no clear edge, wait';
   } else if(spotVal>=0&&spotChg>0&&spotDir==='RISING'){
     interpLabel='STRONG LONG';interpCls='strong-long';interpText='Level + Change + Trend all bullish';
