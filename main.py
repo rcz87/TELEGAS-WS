@@ -57,7 +57,7 @@ from src.connection.rest_poller import CoinGlassRestPoller
 from src.processors.market_context_buffer import MarketContextBuffer
 from src.signals.market_context_filter import MarketContextFilter
 from src.signals.leading_indicator_scorer import LeadingIndicatorScorer
-from src.utils.symbol_normalizer import normalize_symbol, to_base_symbol, display_symbol
+from src.utils.symbol_normalizer import normalize_symbol, to_base_symbol, display_symbol, is_tradeable_crypto
 from src.utils.logger import setup_logger
 from src.models.events import parse_liquidation, parse_trade
 from src.signals.setup_classifier import classify_setup
@@ -439,6 +439,10 @@ class TeleglasPro:
                 if validation.is_valid:
                     raw_symbol = liq_event.get('symbol', 'UNKNOWN')
                     symbol = normalize_symbol(raw_symbol)
+
+                    # Skip non-crypto and blacklisted symbols
+                    if not is_tradeable_crypto(symbol):
+                        continue
 
                     # Parse into typed model (safe — returns None on bad data)
                     typed_event = parse_liquidation(liq_event, symbol=symbol)

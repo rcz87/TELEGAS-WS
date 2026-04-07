@@ -41,6 +41,19 @@ _COMMODITY_MAP = {
     'NASDAQ': 'NAS100',
 }
 
+# Non-crypto symbols that should be blocked from signal pipeline
+# (commodities, stocks, indices — not relevant for crypto trading)
+_NON_CRYPTO_BASES = frozenset({
+    'XAU', 'XAG', 'BRENT', 'SP500', 'NAS100',
+    'PAXG',   # tokenized gold — trades like commodity not crypto
+})
+
+# Coins with consistently bad signal quality (100% loss, low-cap noise)
+_BLACKLISTED_BASES = frozenset({
+    'PIPPIN', 'PLAYSOUT', 'SIREN', 'PROVE', 'SNDK',
+    'MU', 'NOM', 'STO', 'CL',
+})
+
 # Pre-compiled regex for XYZ: prefix
 _PREFIX_RE = re.compile(r'^[A-Z]{2,5}:')
 
@@ -126,6 +139,17 @@ def to_base_symbol(pair_symbol: str) -> str:
         if canonical.endswith(suffix):
             return canonical[:-len(suffix)]
     return canonical
+
+
+def is_tradeable_crypto(pair_symbol: str) -> bool:
+    """
+    Check if a symbol is a tradeable crypto asset (not commodity/stock/blacklisted).
+
+    Returns False for XAU, SP500, BRENT, SILVER, and known noise coins.
+    """
+    base = to_base_symbol(pair_symbol)
+    # Strip leading multiplier (1000PEPE → PEPE not needed, 1000PEPE is valid)
+    return base not in _NON_CRYPTO_BASES and base not in _BLACKLISTED_BASES
 
 
 def display_symbol(pair_symbol: str) -> str:
