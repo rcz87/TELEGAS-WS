@@ -878,6 +878,27 @@ class TeleglasPro:
                 self.lifecycle.ingest(signal_dict)
                 self.stats["signals_generated"] += 1
 
+                # Persist REST signal to database for ML training
+                try:
+                    price_snap = self.market_context_buffer.get_latest_price(base_symbol)
+                    rest_price = price_snap.price if price_snap else 0
+                    rest_risk = rest_price * 0.01 if rest_price > 0 else 0
+                    is_long = signal.direction == "LONG"
+                    rest_entry = rest_price
+                    rest_sl = (rest_entry - rest_risk if is_long else rest_entry + rest_risk) if rest_risk > 0 else 0
+                    rest_tp = (rest_entry + rest_risk * 2 if is_long else rest_entry - rest_risk * 2) if rest_risk > 0 else 0
+                    await self.db.save_signal(
+                        symbol=symbol,
+                        signal_type=signal.signal_type,
+                        direction=signal.direction,
+                        confidence=signal.confidence,
+                        entry_price=rest_entry,
+                        stop_loss=rest_sl,
+                        target_price=rest_tp,
+                    )
+                except Exception as e:
+                    self.logger.debug(f"REST signal DB save error: {e}")
+
                 self.logger.info(
                     f"REST SIGNAL → {symbol} {signal.signal_type} {signal.direction} "
                     f"conf={signal.confidence:.0f}% sources={signal.sources}"
@@ -1095,13 +1116,22 @@ class TeleglasPro:
                 filter_result = self.market_context_filter.evaluate(trading_signal)
 
                 # HARD BLOCK: if filter says not passed, do not send alert
-                if not filter_result.passed:
+                # Exception: STOP_HUNT signals use crowding as their trigger —
+                # the filter would block for the same condition the detector requires.
+                # Downgrade to dashboard-only instead of hard block.
+                is_stop_hunt = trading_signal.signal_type == "STOP_HUNT"
+                if not filter_result.passed and not is_stop_hunt:
                     self.logger.info(
                         f"Signal BLOCKED by market context: {symbol} "
                         f"{trading_signal.signal_type} {trading_signal.direction} — "
                         f"{filter_result.assessment}: {filter_result.reason}"
                     )
                     return
+                if not filter_result.passed and is_stop_hunt:
+                    self.logger.info(
+                        f"STOP_HUNT bypass: {symbol} {trading_signal.direction} — "
+                        f"filter={filter_result.assessment} (crowding expected for pre-hunt)"
+                    )
 
                 # Apply confidence adjustment from market context
                 if filter_result.confidence_adjustment != 0:
@@ -1325,13 +1355,28 @@ class TeleglasPro:
 
                 # Track signal for outcome measurement (always, regardless of toggle)
                 price_zone = trading_signal.metadata.get('stop_hunt', {}).get('price_zone', (0, 0))
-                if price_zone[1] > 0:
+                current_price = price_zone[0] if price_zone[0] > 0 else 0
+                has_zone = price_zone[1] > 0
+
+                if has_zone:
+                    # Legacy post-cascade: use price zone for entry/SL/TP
                     zone_spread = abs(price_zone[1] - price_zone[0])
                     is_long = trading_signal.direction == "LONG"
                     entry = price_zone[1] if is_long else price_zone[0]
                     sl = price_zone[0] - (zone_spread * 0.3) if is_long else price_zone[1] + (zone_spread * 0.3)
                     risk = abs(entry - sl)
                     tp = entry + (risk * 2) if is_long else entry - (risk * 2)
+                elif current_price > 0:
+                    # Pre-hunt signals: use current price with 1% default risk
+                    is_long = trading_signal.direction == "LONG"
+                    entry = current_price
+                    risk = current_price * 0.01
+                    sl = entry - risk if is_long else entry + risk
+                    tp = entry + (risk * 2) if is_long else entry - (risk * 2)
+                else:
+                    entry, sl, tp = 0, 0, 0
+
+                if entry > 0:
                     tracked = self.signal_tracker.track_signal(
                         trading_signal, entry, sl, tp,
                         setup_key=trading_signal.metadata.get('setup_key', '')
