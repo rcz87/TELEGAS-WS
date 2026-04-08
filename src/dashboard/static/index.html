@@ -1845,20 +1845,20 @@ function computeAdaptiveScore(d,regime,regimeConf){
   // ── Trigger & Invalidation per regime ──
   let trigger='',invalidation='';
   if(regime==='ACCUMULATION'){
-    trigger=bias==='LONG'?'SpotCVD sustained rise + OI break above recent high':'Wait for SpotCVD flip to RISING';
-    invalidation='SpotCVD reversal to FALLING + OI drop >1%';
+    trigger=bias==='LONG'?'SpotCVD terus naik + OI break di atas high terakhir':'Tunggu SpotCVD flip ke RISING';
+    invalidation='SpotCVD balik FALLING + OI turun >1% = akumulasi gagal';
   } else if(regime==='DISTRIBUTION'){
-    trigger=bias==='SHORT'?'SpotCVD breakdown + ask absorption increasing':'Wait for CVD alignment bearish';
-    invalidation='SpotCVD flip RISING + strong bid support';
+    trigger=bias==='SHORT'?'SpotCVD breakdown + ask makin besar':'Tunggu CVD aligned bearish';
+    invalidation='SpotCVD flip RISING + bid kuat masuk = distribusi gagal';
   } else if(regime==='LIQUIDATION'){
-    trigger=bias==='SHORT'?'OI still dropping + taker sell dominant':'OI stabilize + SpotCVD flip for reversal long';
-    invalidation=bias==='SHORT'?'OI stabilize + SpotCVD flip RISING':'OI resume dropping + CVD fail';
+    trigger=bias==='SHORT'?'OI masih turun + taker sell dominan':'OI stabil + SpotCVD flip untuk reversal long';
+    invalidation=bias==='SHORT'?'OI stabil + SpotCVD flip RISING = liquidasi selesai':'OI turun lagi + CVD gagal = lanjut turun';
   } else if(regime==='SQUEEZE'){
-    trigger=fr<0?'FutCVD RISING sustain + funding staying negative':'FutCVD FALLING sustain + funding staying positive';
-    invalidation='Funding normalize + crowded side exits orderly';
+    trigger=fr<0?'FutCVD RISING bertahan + funding tetap negatif':'FutCVD FALLING bertahan + funding tetap positif';
+    invalidation='Funding normal kembali + posisi crowded mulai keluar teratur';
   } else {
-    trigger='Wait for regime clarity — CVD alignment or OI directional move';
-    invalidation='N/A — no position in range';
+    trigger='Belum ada arah jelas — tunggu CVD aligned atau OI bergerak';
+    invalidation='Jika sudah punya posisi — pasang SL ketat, regime bisa berubah kapan saja';
   }
 
   return{bias,grade,status,confidence,longRaw,shortRaw,note,trigger,invalidation,vetoed,vetoReason};
