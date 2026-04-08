@@ -1025,6 +1025,18 @@ class TeleglasPro:
                 # Telegram gate: confidence + active coin + CVD veto + funding check
                 send_telegram = signal.confidence >= 65 and self._is_coin_active(symbol)
 
+                # Data quality gate: must have price + at least SpotCVD or FutCVD
+                if send_telegram:
+                    _price_check = self.market_context_buffer.get_latest_price(base_symbol)
+                    _spot_check = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
+                    _fut_check = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
+                    if not _price_check or _price_check.price <= 0:
+                        send_telegram = False
+                        self.logger.info(f"DATA GATE {symbol}: no price data → skip Telegram")
+                    elif not _spot_check and not _fut_check:
+                        send_telegram = False
+                        self.logger.info(f"DATA GATE {symbol}: no CVD data → skip Telegram")
+
                 if send_telegram:
                     spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
                     fut_cvd = self.market_context_buffer.get_latest_futures_cvd(base_symbol)
