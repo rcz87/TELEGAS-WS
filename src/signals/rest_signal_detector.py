@@ -42,7 +42,7 @@ OI_MIN_CHANGE_PCT = 1.5
 
 # Divergence: FutCVD total must be > volume_24h * 0.1%
 DIVERGENCE_VOLUME_RATIO = 0.001  # 0.1% of 24h volume
-DIVERGENCE_ABS_FLOOR = 10_000    # absolute floor $10K (for micro coins)
+DIVERGENCE_ABS_FLOOR = 500_000   # absolute floor $500K (prevents noise when volume unknown)
 
 # CVD significance: SpotCVD must be > volume_24h * 0.01% to trigger flip
 CVD_SIGNIFICANCE_RATIO = 0.0001  # 0.01% of 24h volume
@@ -245,7 +245,11 @@ class RestSignalDetector:
         # Minimum FutCVD total — relative to coin's 24h volume
         div_price = self.buffer.get_latest_price(symbol)
         div_vol = div_price.volume_24h if div_price and hasattr(div_price, 'volume_24h') else 0
-        min_total = max(div_vol * DIVERGENCE_VOLUME_RATIO, DIVERGENCE_ABS_FLOOR) if div_vol > 0 else DIVERGENCE_ABS_FLOOR
+        if div_vol > 0:
+            min_total = max(div_vol * DIVERGENCE_VOLUME_RATIO, DIVERGENCE_ABS_FLOOR)
+        else:
+            min_total = DIVERGENCE_ABS_FLOOR
+            self.logger.debug(f"CVD DIVERGENCE {symbol}: volume_24h unavailable, using floor ${DIVERGENCE_ABS_FLOOR:,.0f}")
 
         # Price change check: stealth = price hasn't moved much yet
         # If price already moved >1% in signal direction, it's not stealth anymore
