@@ -870,9 +870,22 @@ class TeleglasPro:
         except Exception as e:
             self.logger.error(f"State save error: {e}")
 
+    # Per-type REST dedup cooldowns (seconds)
+    _REST_DEDUP_COOLDOWNS = {
+        "OI_SPIKE": 1800,       # 30 min — OI doesn't change every 5 min
+        "WHALE_ACTIVITY": 1800, # 30 min — whale positions don't flip every scan
+        "CVD_FLIP": 300,        # 5 min — CVD flips are time-sensitive
+        "ACCUMULATION": 1800,   # 30 min
+        "DISTRIBUTION": 1800,   # 30 min
+        "SMART_MONEY_BUY": 1800,
+        "SMART_MONEY_SELL": 1800,
+    }
+
     def _rest_signal_dedup(self, symbol: str, signal_type: str, direction: str,
                            cooldown_seconds: int = 300) -> bool:
         """Check if this signal was already sent recently. Returns True if OK to send."""
+        # Use per-type cooldown if defined
+        cooldown_seconds = self._REST_DEDUP_COOLDOWNS.get(signal_type, cooldown_seconds)
         key = f"{symbol}_{signal_type}_{direction}"
         now = time.time()
         last = self._rest_signal_cooldown.get(key, 0)
