@@ -84,7 +84,7 @@ class TelegramBot:
             # Lazily create reusable session
             if self._session is None or self._session.closed:
                 self._session = aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=15)
                 )
 
             # Send via HTTP POST (reusing connection pool)

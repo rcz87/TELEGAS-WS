@@ -40,6 +40,16 @@ CVD_MIN_DELTA = {
 # Minimum OI change % to trigger spike
 OI_MIN_CHANGE_PCT = 1.5
 
+# Minimum FutCVD total for stealth divergence (filter out noise)
+DIVERGENCE_MIN_TOTAL = {
+    "BTC": 50_000_000,
+    "ETH": 20_000_000,
+    "SOL": 5_000_000,
+    "BNB": 5_000_000,
+    "XRP": 3_000_000,
+    "default": 2_000_000,
+}
+
 # Minimum whale flow USD to trigger
 WHALE_MIN_FLOW = 1_000_000
 WHALE_MIN_DOMINANCE = 0.65
@@ -152,6 +162,186 @@ class RestSignalDetector:
                 "futures_cvd_direction": fut_dir,
                 "both_aligned": both_aligned,
                 "delta_usd": delta,
+            },
+        )
+
+    # ── CVD Divergence Detection (Tier 2) ────────────────────────────
+
+    DIVERGENCE_COOLDOWN = 5400  # 90 min
+
+    def check_cvd_divergence(self, symbol: str) -> Optional[RestSignal]:
+        """
+        Detect stealth CVD divergence: FutCVD flipped direction 2+ candles
+        but SpotCVD has NOT followed yet.
+
+        This is a Tier 2 signal — smart money moving before retail.
+        Also triggers on mega delta: single FutCVD candle > 5x avg.
+        """
+        fut_hist = self.buffer.get_futures_cvd_history(symbol, n=12)
+        spot_hist = self.buffer.get_spot_cvd_history(symbol, n=6)
+
+        if not fut_hist or len(fut_hist) < 4:
+            return None
+        if not spot_hist or len(spot_hist) < 2:
+            return None
+
+        # Cooldown check
+        cd_key = f"{symbol}_CVD_DIVERGENCE"
+        now = time.time()
+        if now - self._prev_whale_net.get(cd_key, 0) < self.DIVERGENCE_COOLDOWN:
+            return None
+
+        # FutCVD deltas
+        fut_deltas = [fut_hist[i].cvd_latest - fut_hist[i - 1].cvd_latest
+                      for i in range(1, len(fut_hist))]
+        if not fut_deltas:
+            return None
+
+        # Count consecutive positive/negative FutCVD deltas from most recent
+        pos_streak = 0
+        for d in reversed(fut_deltas):
+            if d > 0:
+                pos_streak += 1
+            else:
+                break
+
+        neg_streak = 0
+        for d in reversed(fut_deltas):
+            if d < 0:
+                neg_streak += 1
+            else:
+                break
+
+        # SpotCVD state
+        spot_latest = spot_hist[-1]
+        spot_dir = spot_latest.cvd_direction
+        spot_level = getattr(spot_latest, 'cvd_cumulative', spot_latest.cvd_latest)
+
+        # SpotCVD delta (latest)
+        spot_delta = 0
+        if len(spot_hist) >= 2:
+            spot_delta = spot_hist[-1].cvd_latest - spot_hist[-2].cvd_latest
+
+        # Mega delta override: single candle > 5x average
+        avg_fut_delta = sum(abs(d) for d in fut_deltas) / len(fut_deltas) if fut_deltas else 0
+        latest_fut_delta = fut_deltas[-1]
+        mega_override = abs(latest_fut_delta) > avg_fut_delta * 5 and avg_fut_delta > 0
+
+        # OI context
+        oi_snap = self.buffer.get_latest_oi(symbol)
+        oi_change = oi_snap.oi_change_pct if oi_snap else 0.0
+
+        # Price
+        price_snap = self.buffer.get_latest_price(symbol)
+        current_price = price_snap.price if price_snap else 0.0
+
+        signal = None
+
+        # Minimum FutCVD total to filter noise
+        min_total = DIVERGENCE_MIN_TOTAL.get(symbol, DIVERGENCE_MIN_TOTAL["default"])
+
+        # Price change check: stealth = price hasn't moved much yet
+        # If price already moved >1% in signal direction, it's not stealth anymore
+        price_history = self.buffer.get_price_history(symbol, limit=6)
+        price_change_pct = 0.0
+        if price_history and len(price_history) >= 3 and price_history[-3].price > 0:
+            price_change_pct = (price_history[-1].price - price_history[-3].price) / price_history[-3].price * 100
+
+        # STEALTH ACCUMULATION: FutCVD rising 2+ candles, SpotCVD not rising
+        if (pos_streak >= 2 or (mega_override and latest_fut_delta > 0)):
+            if spot_dir != "RISING" or spot_level < 0:
+                # Price confirmation: stealth = price NOT already up >1.5%
+                if price_change_pct <= 1.5:
+                    streak = pos_streak if pos_streak >= 2 else 1
+                    fut_total = sum(fut_deltas[-streak:]) if streak > 0 else latest_fut_delta
+                    if abs(fut_total) >= min_total or mega_override:
+                        signal = self._format_divergence(
+                            symbol, "ACCUMULATION", "LONG",
+                            streak, fut_total, spot_level, spot_dir,
+                            oi_change, current_price, mega_override, latest_fut_delta, avg_fut_delta
+                        )
+
+        # STEALTH DISTRIBUTION: FutCVD falling 2+ candles, SpotCVD not falling
+        if signal is None and (neg_streak >= 2 or (mega_override and latest_fut_delta < 0)):
+            if spot_dir != "FALLING" or spot_level > 0:
+                # Price confirmation: stealth = price NOT already down >1.5%
+                if price_change_pct >= -1.5:
+                    streak = neg_streak if neg_streak >= 2 else 1
+                    fut_total = sum(fut_deltas[-streak:]) if streak > 0 else latest_fut_delta
+                    if abs(fut_total) >= min_total or mega_override:
+                        signal = self._format_divergence(
+                            symbol, "DISTRIBUTION", "SHORT",
+                            streak, fut_total, spot_level, spot_dir,
+                            oi_change, current_price, mega_override, latest_fut_delta, avg_fut_delta
+                        )
+
+        if signal:
+            # Use _prev_whale_net dict for cooldown (reusing existing dict)
+            self._prev_whale_net[cd_key] = now
+
+        return signal
+
+    def _format_divergence(self, symbol, pattern, direction, streak,
+                           fut_total, spot_level, spot_dir,
+                           oi_change, price, mega, latest_delta, avg_delta) -> RestSignal:
+        from datetime import datetime, timezone, timedelta
+        _wib = timezone(timedelta(hours=7))
+        time_str = datetime.now(_wib).strftime("%H:%M:%S")
+        price_str = f"${price:,.4f}" if price > 0 else "N/A"
+
+        def _f(v):
+            av = abs(v)
+            sign = "+" if v >= 0 else ""
+            if av >= 1e6: return f"{sign}{v/1e6:.1f}M"
+            if av >= 1e3: return f"{sign}{v/1e3:.0f}K"
+            return f"{sign}{v:,.0f}"
+
+        spot_sign = "POSITIF" if spot_level >= 0 else "NEGATIF"
+        mega_line = ""
+        if mega:
+            ratio = abs(latest_delta) / avg_delta if avg_delta > 0 else 0
+            mega_line = f"\n⚡ MEGA DELTA: {_f(latest_delta)} = {ratio:.1f}x avg → immediate trigger\n"
+
+        msg = (
+            f"🟡 TIER 2 — STEALTH {pattern}\n"
+            f"{symbol} | {price_str} | {time_str} WIB\n"
+            f"\n"
+            f"Smart money {'BUYING' if direction == 'LONG' else 'SELLING'} — retail belum sadar\n"
+            f"{mega_line}"
+            f"\n"
+            f"CVD DIVERGENCE:\n"
+            f"FutCVD  : {'RISING' if direction == 'LONG' else 'FALLING'} {streak} candle | Total: {_f(fut_total)}\n"
+            f"SpotCVD : {_f(spot_level)} ({spot_sign}) {spot_dir} ← belum flip\n"
+            f"\n"
+            f"OI 1h   : {oi_change:+.1f}%\n"
+            f"\n"
+            f"INTERPRETATION:\n"
+            f"FutCVD flip tanpa SpotCVD = smart money gerak duluan.\n"
+            f"Kalau SpotCVD ikut flip → CONFIRMED (Tier 3 alert akan menyusul).\n"
+            f"\n"
+            f"ACTION: Small entry $10-50 test. SL ketat."
+        )
+
+        self.logger.info(
+            f"CVD DIVERGENCE {symbol}: STEALTH {pattern} {direction} "
+            f"streak={streak} mega={mega}"
+        )
+
+        return RestSignal(
+            symbol=symbol,
+            signal_type="CVD_DIVERGENCE",
+            direction=direction,
+            confidence=65,
+            sources=["CVD_DIVERGENCE"],
+            description=f"Stealth {pattern.lower()}: FutCVD {'rising' if direction == 'LONG' else 'falling'} {streak} candle, SpotCVD {spot_dir}",
+            metadata={
+                "pattern": pattern,
+                "fut_streak": streak,
+                "fut_total": fut_total,
+                "spot_level": spot_level,
+                "spot_direction": spot_dir,
+                "mega_override": mega,
+                "message": msg,
             },
         )
 

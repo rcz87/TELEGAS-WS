@@ -51,6 +51,7 @@ from src.signals.signal_validator import SignalValidator
 from src.signals.signal_tracker import SignalTracker
 from src.alerts.message_formatter import MessageFormatter
 from src.alerts.telegram_bot import TelegramBot
+from src.alerts.telegram_router import TelegramRouter
 from src.alerts.alert_queue import AlertQueue
 from src.storage.database import Database
 from src.connection.rest_poller import CoinGlassRestPoller
@@ -62,6 +63,7 @@ from src.utils.logger import setup_logger
 from src.models.events import parse_liquidation, parse_trade
 from src.signals.setup_classifier import classify_setup
 from src.signals.feature_logger import FeatureLogger
+from src.analyzers.taker_signal_detector import TakerSignalDetector
 from src.ml.dataset_builder import DatasetBuilder
 from src.ml.calibration import CalibrationTable
 from src.ml.model_trainer import ModelTrainer
@@ -155,6 +157,7 @@ class TeleglasPro:
 
         # Movement detector (stealth flow, flush/absorption, quiet-to-move)
         self.movement_detector = MovementDetector()
+        self.taker_signal_detector = TakerSignalDetector()
 
         # Leading indicator scorer (CVD + OI primary scoring, tier-aware)
         self.leading_scorer = LeadingIndicatorScorer(monitoring_config=monitoring_config)
@@ -248,13 +251,15 @@ class TeleglasPro:
 
         # Telegram (optional - only if configured)
         telegram_config = config.get('telegram', {})
-        self.telegram_bot = None
-        if telegram_config.get('enabled', False):
-            self.telegram_bot = TelegramBot(
-                bot_token=telegram_config.get('bot_token', ''),
-                chat_id=telegram_config.get('chat_id', ''),
-                rate_limit_delay=config.get('alerts', {}).get('rate_limit_delay', 3.0)
-            )
+        self.telegram_router = TelegramRouter(
+            telegram_config=telegram_config,
+            rate_limit_delay=config.get('alerts', {}).get('rate_limit_delay', 3.0),
+        )
+        # Backward compat: expose Tier 3 bot as self.telegram_bot
+        self.telegram_bot = self.telegram_router.telegram_bot
+
+        # Noise filter state: track last REST alert per symbol for anti-flip/consistency
+        self._rest_last_alert: dict = {}  # symbol → {direction, confidence, timestamp}
         
         # WebSocket
         ws_config = config.get('websocket', {})
@@ -634,13 +639,45 @@ class TeleglasPro:
                 )
                 for alert in alerts:
                     msg = alert.get("message", "")
-                    priority = alert.get("priority", 2)
-                    if msg:
-                        await self.alert_queue.add(msg, priority=priority)
-                        self.logger.info(
-                            f"🔍 Movement: {alert.get('type')} {alert.get('coin')} "
-                            f"{alert.get('direction')}"
-                        )
+                    grade = alert.get("grade", "C")
+                    coin = alert.get("coin", "")
+                    direction = alert.get("direction", "")
+                    if not msg:
+                        continue
+
+                    # Route by grade: A → Tier 3 (confirmed), B → Tier 2 (early)
+                    if grade == "A":
+                        tier = 3
+                    elif grade == "B":
+                        tier = 2
+                    else:
+                        continue  # Grade C not sent
+
+                    # Inject BTC macro label for non-BTC coins
+                    if coin and coin != "BTC":
+                        btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+                        if btc_spot:
+                            btc_dir = btc_spot.cvd_direction
+                            is_long = direction in ("LONG", "BUY")
+                            if is_long:
+                                btc_tag = "BTC: ALIGNED ✅" if btc_dir == "RISING" else "BTC: DIVERGENT ⚠️"
+                            else:
+                                btc_tag = "BTC: ALIGNED ✅" if btc_dir == "FALLING" else "BTC: DIVERGENT ⚠️"
+                            # Append after first line (header)
+                            lines = msg.split("\n", 1)
+                            if len(lines) == 2:
+                                msg = f"{lines[0]} | {btc_tag}\n{lines[1]}"
+
+                    if self.telegram_router.enabled:
+                        await self.telegram_router.send_alert(msg, tier=tier)
+                        self.stats['alerts_sent'] += 1
+                    else:
+                        await self.alert_queue.add(msg, priority=alert.get("priority", 2))
+
+                    self.logger.info(
+                        f"🔍 Movement: {alert.get('type')} {alert.get('coin')} "
+                        f"{alert.get('direction')} grade={grade} → Tier {tier}"
+                    )
             except Exception as e:
                 self.logger.error(f"MovementDetector error: {e}")
 
@@ -850,6 +887,70 @@ class TeleglasPro:
             }
         return True
 
+    def _check_noise_filters(self, symbol: str, direction: str, confidence: float) -> str:
+        """
+        Check noise filters for REST signals. Returns routing decision.
+
+        Returns:
+            'confirmed' — send to Tier 3 (full alert)
+            'skip'      — do not send to any Telegram
+        """
+        now = time.time()
+        last = self._rest_last_alert.get(symbol)
+
+        # FILTER 1 — Minimum confidence: < 65 → skip Telegram entirely
+        if confidence < 65:
+            self.logger.info(f"NOISE FILTER {symbol}: conf {confidence:.0f}% < 65 → skip")
+            return "skip"
+
+        if last:
+            gap = now - last['timestamp']
+
+            # FILTER 2 — Anti-flip cooldown: same symbol < 30 min → skip
+            #   Exception: confidence jumped >10 points from previous
+            if gap < 1800:  # 30 minutes
+                conf_jump = confidence - last['confidence']
+                if conf_jump <= 10:
+                    self.logger.info(
+                        f"NOISE FILTER {symbol}: cooldown {gap:.0f}s < 1800s "
+                        f"(conf jump {conf_jump:+.0f} ≤ 10) → skip"
+                    )
+                    return "skip"
+                else:
+                    self.logger.info(
+                        f"NOISE FILTER {symbol}: cooldown override — conf jump {conf_jump:+.0f} > 10"
+                    )
+
+            # FILTER 3 — Directional consistency: opposite direction within 1hr → skip
+            if direction != last['direction'] and gap < 3600:  # 1 hour
+                conf_jump = confidence - last['confidence']
+                if conf_jump <= 10:
+                    self.logger.info(
+                        f"NOISE FILTER {symbol}: direction flip {last['direction']}→{direction} "
+                        f"within {gap:.0f}s (conf jump {conf_jump:+.0f} ≤ 10) → skip"
+                    )
+                    return "skip"
+                else:
+                    self.logger.info(
+                        f"NOISE FILTER {symbol}: direction flip override — conf jump {conf_jump:+.0f} > 10"
+                    )
+
+        # Passed all filters — record this alert and send to confirmed
+        self._rest_last_alert[symbol] = {
+            'direction': direction,
+            'confidence': confidence,
+            'timestamp': now,
+        }
+
+        # Cleanup old entries
+        if len(self._rest_last_alert) > 200:
+            cutoff = now - 7200  # 2 hours
+            self._rest_last_alert = {
+                k: v for k, v in self._rest_last_alert.items() if v['timestamp'] > cutoff
+            }
+
+        return "confirmed"
+
     async def _scan_rest_signals(self):
         """Scan all tracked symbols for REST-based signals (CVD flip, OI spike, whale)."""
         try:
@@ -909,7 +1010,7 @@ class TeleglasPro:
                 )
 
                 # Telegram gate: confidence + active coin + CVD veto + funding check
-                send_telegram = signal.confidence >= 72 and self._is_coin_active(symbol)
+                send_telegram = signal.confidence >= 65 and self._is_coin_active(symbol)
 
                 if send_telegram:
                     spot_cvd = self.market_context_buffer.get_latest_spot_cvd(base_symbol)
@@ -940,8 +1041,17 @@ class TeleglasPro:
                                 signal.confidence = max(55, signal.confidence - 8)
                                 self.logger.info(f"FR PENALTY {symbol}: SHORT -8 (avg FR {avg_fr*100:+.4f}%)")
                         # Re-check confidence after penalty
-                        if signal.confidence < 72:
+                        if signal.confidence < 65:
                             send_telegram = False
+
+                # Noise filters: anti-flip, directional consistency, min confidence
+                alert_tier = 3  # default: confirmed
+                if send_telegram:
+                    routing = self._check_noise_filters(symbol, signal.direction, signal.confidence)
+                    if routing == "skip":
+                        send_telegram = False
+                    else:
+                        alert_tier = 3  # confirmed
 
                 if send_telegram:
                     try:
@@ -961,9 +1071,20 @@ class TeleglasPro:
                         price_str = f"${price_snap.price:,.4f}" if price_snap else "N/A"
                         chg_str = f"{price_snap.change_24h_pct:+.1f}%" if price_snap else ""
 
+                        # BTC macro label — check BTC SpotCVD direction
+                        btc_label = ""
+                        if base_symbol != "BTC":
+                            btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+                            if btc_spot:
+                                btc_dir = btc_spot.cvd_direction
+                                if signal.direction == "LONG":
+                                    btc_label = " | BTC: ALIGNED ✅" if btc_dir == "RISING" else " | BTC: DIVERGENT ⚠️"
+                                else:  # SHORT
+                                    btc_label = " | BTC: ALIGNED ✅" if btc_dir == "FALLING" else " | BTC: DIVERGENT ⚠️"
+
                         lines = [
                             f"{display_symbol(symbol)} | {price_str} | {_now}",
-                            f"Trigger: REST SCAN | {signal.direction}",
+                            f"Trigger: REST SCAN | {signal.direction}{btc_label}",
                             "",
                         ]
 
@@ -1024,12 +1145,80 @@ class TeleglasPro:
                         lines.append("DYOR — verifikasi sebelum entry")
 
                         alert_msg = "\n".join(lines)
-                        await self.alert_queue.add(alert_msg, priority=2)
+                        # Route through TelegramRouter based on tier
+                        if self.telegram_router.enabled:
+                            await self.telegram_router.send_alert(alert_msg, tier=alert_tier)
+                            self.stats['alerts_sent'] += 1
+                        else:
+                            await self.alert_queue.add(alert_msg, priority=2)
                     except Exception as e:
                         self.logger.debug(f"REST alert format error: {e}")
 
         except Exception as e:
             self.logger.error(f"REST signal scan error: {e}")
+
+        # ── Phase 2: Tier 1 (Taker Exhaustion + Climactic) ──
+        try:
+            tier1_alerts = self.taker_signal_detector.scan(self.market_context_buffer)
+            for alert in tier1_alerts:
+                msg = alert.get("message", "")
+                symbol = alert.get("symbol", "")
+                direction = alert.get("direction", "")
+                if not msg:
+                    continue
+
+                # Inject BTC macro label
+                if symbol and symbol != "BTC":
+                    btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+                    if btc_spot:
+                        btc_dir = btc_spot.cvd_direction
+                        is_long = direction in ("LONG", "LONG_PREPARE")
+                        btc_tag = "BTC: ALIGNED ✅" if (
+                            (is_long and btc_dir == "RISING") or
+                            (not is_long and btc_dir == "FALLING")
+                        ) else "BTC: DIVERGENT ⚠️"
+                        msg += f"\n{btc_tag}"
+
+                if self.telegram_router.enabled:
+                    await self.telegram_router.send_alert(msg, tier=1)
+                    self.stats['alerts_sent'] += 1
+                self.logger.info(
+                    f"⚡ Tier 1: {alert.get('type')} {symbol} {direction} → Tier 1"
+                )
+        except Exception as e:
+            self.logger.error(f"Tier 1 detector error: {e}")
+
+        # ── Phase 2: Tier 2 (Stealth CVD Divergence) ──
+        try:
+            for base_symbol in self.rest_poller.symbols[:50]:
+                divergence = self.rest_signal_detector.check_cvd_divergence(base_symbol)
+                if not divergence:
+                    continue
+
+                msg = divergence.metadata.get("message", "")
+                if not msg:
+                    continue
+
+                # Inject BTC macro label
+                if base_symbol != "BTC":
+                    btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+                    if btc_spot:
+                        btc_dir = btc_spot.cvd_direction
+                        is_long = divergence.direction == "LONG"
+                        btc_tag = "BTC: ALIGNED ✅" if (
+                            (is_long and btc_dir == "RISING") or
+                            (not is_long and btc_dir == "FALLING")
+                        ) else "BTC: DIVERGENT ⚠️"
+                        msg += f"\n{btc_tag}"
+
+                if self.telegram_router.enabled:
+                    await self.telegram_router.send_alert(msg, tier=2)
+                    self.stats['alerts_sent'] += 1
+                self.logger.info(
+                    f"🔍 Tier 2: CVD_DIVERGENCE {base_symbol} {divergence.direction} → Tier 2"
+                )
+        except Exception as e:
+            self.logger.error(f"Tier 2 divergence detector error: {e}")
 
     def _update_order_flow_from_rest(self):
         """Update dashboard order flow using REST taker data (fixes buy_ratio=0)."""
@@ -1363,17 +1552,47 @@ class TeleglasPro:
                 # Register with lifecycle manager (expiry, primary selection)
                 lifecycle_data = self.lifecycle.ingest(signal_dict)
 
-                # Check dashboard toggle AND market context filter
+                # Check dashboard toggle AND market context filter + noise filters
                 if self._is_coin_active(symbol) and filter_passed:
-                    formatted_message = self.message_formatter.format_signal(trading_signal)
-                    await self.alert_queue.add(
-                        formatted_message,
-                        priority=trading_signal.priority
+                    # Noise filter check
+                    ws_routing = self._check_noise_filters(
+                        symbol, trading_signal.direction, trading_signal.confidence
                     )
-                    self.logger.info(
-                        f"🎯 Signal queued: {symbol} {trading_signal.signal_type} "
-                        f"[context: {filter_result.assessment}]"
-                    )
+                    if ws_routing == "skip":
+                        self.logger.info(
+                            f"🔇 Signal noise-filtered: {symbol} {trading_signal.signal_type}"
+                        )
+                    else:
+                        formatted_message = self.message_formatter.format_signal(trading_signal)
+
+                        # Inject BTC macro label after first line
+                        base_sym = to_base_symbol(symbol)
+                        if base_sym != "BTC":
+                            btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+                            if btc_spot:
+                                btc_dir = btc_spot.cvd_direction
+                                is_long = trading_signal.direction in ("LONG", "BULLISH")
+                                if is_long:
+                                    btc_tag = "BTC: ALIGNED ✅" if btc_dir == "RISING" else "BTC: DIVERGENT ⚠️"
+                                else:
+                                    btc_tag = "BTC: ALIGNED ✅" if btc_dir == "FALLING" else "BTC: DIVERGENT ⚠️"
+                                lines = formatted_message.split("\n", 1)
+                                if len(lines) == 2:
+                                    formatted_message = f"{lines[0]} | {btc_tag}\n{lines[1]}"
+
+                        # Route via TelegramRouter (Tier 3 = confirmed)
+                        if self.telegram_router.enabled:
+                            await self.telegram_router.send_alert(formatted_message, tier=3)
+                            self.stats['alerts_sent'] += 1
+                        else:
+                            await self.alert_queue.add(
+                                formatted_message,
+                                priority=trading_signal.priority
+                            )
+                        self.logger.info(
+                            f"🎯 Signal sent: {symbol} {trading_signal.signal_type} "
+                            f"[context: {filter_result.assessment}] → Tier 3"
+                        )
                 elif not filter_result.passed:
                     self.logger.info(
                         f"📡 Signal filtered by market context: {symbol} "
@@ -1649,14 +1868,16 @@ class TeleglasPro:
                             base_symbol, direction, best, price, ctx
                         )
 
-                        if msg and self.telegram_bot:
-                            await self.alert_queue.add(msg, priority=2)
+                        if msg and self.telegram_router.enabled:
+                            # Proactive = leading indicator = not confirmed → Tier 2
+                            await self.telegram_router.send_alert(msg, tier=2)
                             self._proactive_cooldowns[base_symbol] = now.timestamp()
                             self._proactive_hourly.append(now.timestamp())
                             alerts_sent += 1
+                            self.stats['alerts_sent'] += 1
                             self.logger.info(
                                 f"🔍 Proactive signal: {base_symbol} {direction} "
-                                f"{best.total:.0f}% ({best.label_text})"
+                                f"{best.total:.0f}% ({best.label_text}) → Tier 2"
                             )
 
                 if alerts_sent > 0:
@@ -1919,10 +2140,21 @@ class TeleglasPro:
         wib = timezone(timedelta(hours=7))
         time_str = datetime.now(wib).strftime('%H:%M:%S')
         price_str = fmt.format_price(price) if price > 0 else "N/A"
+        # BTC macro label
+        btc_label = ""
+        if symbol != "BTC":
+            btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+            if btc_spot:
+                btc_dir = btc_spot.cvd_direction
+                if direction == "LONG":
+                    btc_label = " | BTC: ALIGNED ✅" if btc_dir == "RISING" else " | BTC: DIVERGENT ⚠️"
+                else:
+                    btc_label = " | BTC: ALIGNED ✅" if btc_dir == "FALLING" else " | BTC: DIVERGENT ⚠️"
+
         header = f"\U0001f4a1 *{symbol}* | {price_str} | {time_str} WIB"
 
         # --- Trigger: Leading Indicator ---
-        trigger_lines = [f"\U0001f514 *Trigger: LEADING SCAN* | {direction}"]
+        trigger_lines = [f"\U0001f514 *Trigger: LEADING SCAN* | {direction}{btc_label}"]
         for ind in score.indicators:
             if ind.detail:
                 trigger_lines.append(f"\u2726 {ind.detail}")
@@ -2213,12 +2445,14 @@ class TeleglasPro:
                 return
             
             # Test Telegram if enabled
-            if self.telegram_bot:
-                self.logger.info("Testing Telegram connection...")
-                if await self.telegram_bot.test_connection():
-                    self.logger.info("✅ Telegram connected")
-                else:
-                    self.logger.warning("⚠️ Telegram connection failed")
+            if self.telegram_router.enabled:
+                self.logger.info("Testing Telegram connections...")
+                results = await self.telegram_router.test_connection()
+                for tier, ok in results.items():
+                    label = {1: "WARNING", 2: "EARLY", 3: "CONFIRMED"}.get(tier, f"T{tier}")
+                    status = "✅" if ok else "⚠️ FAILED"
+                    self.logger.info(f"  Tier {tier} ({label}): {status}")
+
             
             # CRITICAL FIX Bug #2: Mark as initialized before starting tasks
             self.logger.info("✅ System initialization complete")
@@ -2271,9 +2505,8 @@ class TeleglasPro:
 
             await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Close Telegram bot session
-            if self.telegram_bot:
-                await self.telegram_bot.close()
+            # Close Telegram bot sessions
+            await self.telegram_router.close()
 
             # Save state to database before exit
             await self._save_state()
@@ -2431,7 +2664,13 @@ def load_config() -> dict:
     config['telegram'] = {
         'enabled': bool(os.getenv('TELEGRAM_BOT_TOKEN')),
         'bot_token': os.getenv('TELEGRAM_BOT_TOKEN', ''),
-        'chat_id': os.getenv('TELEGRAM_CHAT_ID', '')
+        'chat_id': os.getenv('TELEGRAM_CHAT_ID', ''),
+        # Tier 2 — Early signals (stealth CVD divergence, etc.)
+        'tier2_bot_token': os.getenv('TELEGRAM_BOT_TOKEN_TIER2', ''),
+        'tier2_chat_id': os.getenv('TELEGRAM_CHAT_ID_TIER2', ''),
+        # Tier 1 — Warning signals (exhaustion, climactic)
+        'tier1_bot_token': os.getenv('TELEGRAM_BOT_TOKEN_TIER1', ''),
+        'tier1_chat_id': os.getenv('TELEGRAM_CHAT_ID_TIER1', ''),
     }
     
     return config
