@@ -533,10 +533,15 @@ async def analyze_coin(request: Request):
                 if s["total"] > 0:
                     swr = s["wins"] / s["total"] * 100
                     stats_block += f"- {s['regime']}: {s['total']} calls, {swr:.0f}% win rate, avg PnL {s['avg_pnl']:+.2f}%\n"
-            if wr < 50 and total >= 3:
-                stats_block += "- WARNING: Your accuracy is below 50%. Be more conservative. Only give HIGH conviction on very clear setups.\n"
-            if losses > wins and total >= 5:
-                stats_block += "- CRITICAL: More losses than wins. Review if you are over-trading RANGE regimes or calling entries too early.\n"
+            if wr >= 60 and total >= 3:
+                stats_block += f"- GOOD: Win rate {wr:.0f}% — your directional calls are WORKING. Keep giving entries confidently.\n"
+            elif wr >= 50 and total >= 3:
+                stats_block += f"- OK: Win rate {wr:.0f}% — profitable. Be more aggressive on high-conviction setups.\n"
+            elif wr < 40 and total >= 5:
+                stats_block += "- NOTE: Low win rate — check if you're calling NEUTRAL too often. Being wrong is better than being silent.\n"
+            neutral_count = sum(1 for s in stats if s.get("regime") == "RANGE" and s["total"] > 0)
+            if neutral_count > total * 0.4:
+                stats_block += "- WARNING: >40% of your calls are NEUTRAL/NO TRADE. You are being too conservative. The market always has direction — find it.\n"
 
         # ── Build time-series context from coin data ──
         # SpotCVD sparkline (20 bars x 5min = 100 min history)
@@ -709,40 +714,45 @@ REGIME ENGINE:
 - Grade: {regime_data.get('grade', 'N/A')} | Bias: {regime_data.get('bias', 'N/A')}
 - Long Raw: {regime_data.get('long_raw', 0)} | Short Raw: {regime_data.get('short_raw', 0)}
 {whale_block}{history_block}{stats_block}
-═══ MONEY FLOW RULES v2 — YOU MUST FOLLOW ═══
+═══ MONEY FLOW RULES v2.1 — BALANCED FRAMEWORK ═══
 
-RULE: FLOW ACCELERATION — check if SpotCVD/FutCVD delta is ACCELERATING (each candle bigger than previous = trend strengthening) or DECELERATING (each candle smaller = trend weakening). 3+ candles same direction accelerating = strong signal. Label: BUYING ACCELERATING / SELLING ACCELERATING / MOMENTUM DECELERATING / CHOPPY.
+YOUR JOB IS TO FIND ENTRIES, NOT AVOID THEM.
+You are a TRADER, not a risk manager. Every market has a trade — find it.
+NEUTRAL/NO TRADE is only acceptable when data GENUINELY conflicts (SpotCVD vs FutCVD opposing AND taker flat). If flow is directional, you MUST give a directional bias with entry.
 
-RULE: EXHAUSTION CHECK — if this looks like a reversal setup, check 5 metrics:
-1) Taker Net < 10% of peak? 2) FutCVD per candle < 10% of peak? 3) Volume < 15% of peak?
-4) OI stopped dropping/flat/rising? 5) Liquidation near zero?
-Need 3/5 for TRUE EXHAUSTION. Less = NOT EXHAUSTED, do NOT counter-trade.
+═══ WHEN TO ENTER (check these FIRST) ═══
+✅ LONG kalau: SpotCVD RISING atau FutCVD RISING + taker net positif. Ga perlu SEMUA aligned — 2 dari 3 cukup.
+✅ SHORT kalau: SpotCVD FALLING atau FutCVD FALLING + taker net negatif. 2 dari 3 cukup.
+✅ CONTINUATION entry valid: setelah pullback dalam trend, selama CVD direction belum flip. Rally >2% bukan alasan skip kalau flow masih accelerating.
+✅ REVERSAL entry valid: setelah exhaustion (taker drop >80% dari peak) + CVD flip. Ga perlu tunggu semua metric sempurna.
+✅ SQUEEZE entry: FR extreme + crowded positioning = high R/R play.
+✅ Kalau Long Score atau Short Score > 50 di regime engine → itu sudah sinyal directional, RESPECT IT.
 
-RULE: MARKET STATE — classify as one of: CONTINUATION / REVERSAL ATTEMPT / FAILED REVERSAL / CHOP-TRANSITION / DISTRIBUTION / ABSORPTION / SQUEEZE / PROFIT-TAKING. Give confidence HIGH/MEDIUM/LOW.
+═══ ANALYSIS RULES ═══
+FLOW ACCELERATION — check if SpotCVD/FutCVD delta is ACCELERATING (each candle bigger) or DECELERATING (each candle smaller). 3+ candles same direction = signal.
 
-RULE: OI + PRICE MATRIX — OI up + Price up = MOMENTUM. OI up + Price down = SHORT ADDING. OI down + Price up = SHORT COVERING. OI down + Price down = DELEVERAGING.
+OI + PRICE MATRIX — OI up + Price up = MOMENTUM. OI up + Price down = SHORT ADDING. OI down + Price up = SHORT COVERING. OI down + Price down = DELEVERAGING.
 
-RULE: WHALE = CONFIRMATION ONLY — whale is NOT a trigger. Only use to confirm or deny flow direction.
+WHALE = CONFIRMATION — whale confirms or denies flow direction, not a standalone trigger.
 
-RULE: FUNDING TRAP — if within 60 min of funding settlement:
-- FR negative + shorts >65% = SQUEEZE RISK for shorts
-- FR positive + longs >65% = FLUSH RISK for longs
-- FR extreme (>0.05%) = EXTREME SQUEEZE SETUP possible
+FUNDING — within 60 min of settlement: FR negative + shorts >65% = squeeze risk. FR positive + longs >65% = flush risk.
 
-RULE: SESSION — Asia=scan only, London=early entry, NY=prime execution. Cost per $1 changes per session. NY volume 3-5x Asia.
-
-ENTRY HARD RULES:
-❌ JANGAN LONG kalau SpotCVD + FutCVD keduanya NEGATIVE
-❌ JANGAN SHORT kalau SpotCVD + FutCVD keduanya POSITIVE
-❌ JANGAN ENTRY tanpa flow confirmation
-❌ JANGAN CHASE rally >2% dari low
+═══ HARD BLOCKS (only these 3) ═══
+❌ JANGAN LONG kalau SpotCVD DAN FutCVD keduanya FALLING + taker net negatif (semua 3 berlawanan)
+❌ JANGAN SHORT kalau SpotCVD DAN FutCVD keduanya RISING + taker net positif (semua 3 berlawanan)
 ❌ JANGAN ENTRY 15 min sebelum funding KECUALI extreme FR squeeze
-❌ CHOP/TRANSITION = NO TRADE
 
-DATA INTEGRITY (NEVER VIOLATE):
+EVERYTHING ELSE = TRADEABLE. Find the entry.
+
+═══ CONVICTION GUIDE ═══
+HIGH: 3/3 aligned (CVD + taker + OI). Give specific entry price.
+MEDIUM: 2/3 aligned. Give entry with tighter SL.
+LOW: hanya kalau data genuinely mixed/conflicting. Still give conditional entry ("entry kalau X terjadi").
+NO TRADE: ONLY jika semua data flat/zero/unavailable. Ini harus JARANG — <15% of calls.
+
+DATA INTEGRITY:
 - ONLY use data provided above. NEVER invent values.
-- If data shows 0, N/A, or "no history" → say "DATA UNAVAILABLE", do NOT fabricate.
-- Report CVD exactly as shown. Do NOT reinterpret.
+- If data shows 0 or N/A → say "DATA UNAVAILABLE", do NOT fabricate.
 
 ═══ OUTPUT FORMAT (follow EXACTLY — RESPOND IN BAHASA INDONESIA) ═══
 IMPORTANT: Write your ENTIRE analysis in Bahasa Indonesia. All explanations, evidence, verdicts, and danger notes must be in Indonesian. Technical terms (SpotCVD, FutCVD, OI, etc.) may stay in English but all descriptions and reasoning MUST be in Indonesian.
@@ -769,20 +779,20 @@ Confidence: [HIGH / MEDIUM / LOW]
 Evidence: [2-3 key data points]
 
 5. VERDICT
-BIAS: LONG / SHORT / NEUTRAL
-CONVICTION: HIGH / MEDIUM / LOW / NO TRADE
-ENTRY: [specific price or condition, or "NO ENTRY — reason"]
-STOP LOSS: [specific price]
-TARGET: [specific price or %]
-R/R: [ratio]
+BIAS: LONG / SHORT (NEUTRAL hanya kalau semua data flat/unavailable)
+CONVICTION: HIGH / MEDIUM / LOW
+ENTRY: [specific price — WAJIB kasih angka. Gunakan support/resistance terdekat atau current price ±0.3%]
+STOP LOSS: [specific price — WAJIB]
+TARGET: [specific price — WAJIB]
+R/R: [ratio — minimum 1:1.5]
 
 6. KEY SIGNALS
-- [most important signal]
+- [most important signal — apa yang bikin lo yakin arah ini]
 - [second signal]
-- [third signal]
+- [confirmation yang ditunggu kalau conviction LOW]
 
 7. DANGER
-[what invalidates this setup — be specific]"""
+[what invalidates this setup — 1 specific condition]"""
 
         http = await get_http()
         resp = await http.post(
