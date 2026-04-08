@@ -645,28 +645,33 @@ class TeleglasPro:
                     if not msg:
                         continue
 
-                    # Route by grade: A → Tier 3 (confirmed), B → Tier 2 (early)
-                    if grade == "A":
-                        tier = 3
-                    elif grade == "B":
-                        tier = 2
-                    else:
-                        continue  # Grade C not sent
+                    # Grade C not sent
+                    if grade == "C":
+                        continue
 
-                    # Inject BTC macro label for non-BTC coins
-                    if coin and coin != "BTC":
-                        btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
-                        if btc_spot:
-                            btc_dir = btc_spot.cvd_direction
-                            is_long = direction in ("LONG", "BUY")
-                            if is_long:
-                                btc_tag = "BTC: ALIGNED ✅" if btc_dir == "RISING" else "BTC: DIVERGENT ⚠️"
-                            else:
-                                btc_tag = "BTC: ALIGNED ✅" if btc_dir == "FALLING" else "BTC: DIVERGENT ⚠️"
-                            # Append after first line (header)
-                            lines = msg.split("\n", 1)
-                            if len(lines) == 2:
-                                msg = f"{lines[0]} | {btc_tag}\n{lines[1]}"
+                    # Base tier by grade: A → 3 (confirmed), B → 2 (early)
+                    base_tier = 3 if grade == "A" else 2
+
+                    # Centralized pre-send gate: noise filter + BTC + FR + confidence
+                    gate = self._pre_send_gate(
+                        symbol=f"{coin}USDT", direction=direction,
+                        confidence=alert.get("confidence", 70),
+                        grade=grade, base_tier=base_tier,
+                    )
+                    if not gate["send"]:
+                        self.logger.info(
+                            f"🔇 Movement BLOCKED: {alert.get('type')} {coin} "
+                            f"{direction} grade={grade} penalties={gate['penalties']}"
+                        )
+                        continue
+
+                    tier = gate["tier"]
+
+                    # Inject BTC tag from gate (already computed)
+                    if gate["btc_tag"] and coin != "BTC":
+                        lines = msg.split("\n", 1)
+                        if len(lines) == 2:
+                            msg = f"{lines[0]} | {gate['btc_tag']}\n{lines[1]}"
 
                     if self.telegram_router.enabled:
                         await self.telegram_router.send_alert(msg, tier=tier)
@@ -675,8 +680,9 @@ class TeleglasPro:
                         await self.alert_queue.add(msg, priority=alert.get("priority", 2))
 
                     self.logger.info(
-                        f"🔍 Movement: {alert.get('type')} {alert.get('coin')} "
-                        f"{alert.get('direction')} grade={grade} → Tier {tier}"
+                        f"🔍 Movement: {alert.get('type')} {coin} "
+                        f"{direction} grade={grade} → Tier {tier}"
+                        f"{' [' + ','.join(gate['penalties']) + ']' if gate['penalties'] else ''}"
                     )
             except Exception as e:
                 self.logger.error(f"MovementDetector error: {e}")
@@ -964,6 +970,86 @@ class TeleglasPro:
 
         return "confirmed"
 
+    def _pre_send_gate(self, symbol: str, direction: str, confidence: float,
+                       grade: str = "A", base_tier: int = 3) -> dict:
+        """
+        Centralized pre-send gate for ALL alert paths.
+
+        Applies:
+          1. Noise filter (anti-flip, directional consistency, min confidence 65)
+          2. BTC alignment check → DIVERGENT = -5 confidence + force Tier 2
+          3. FR split detection → -3 confidence
+          4. Grade B → max Tier 2
+          5. Confidence < 72 → Tier 2 (Tier 3 only for confirmed ≥72)
+
+        Returns:
+            {"send": bool, "tier": int, "confidence": float,
+             "btc_aligned": bool, "btc_tag": str, "penalties": list[str]}
+        """
+        penalties = []
+        tier = base_tier
+        conf = confidence
+
+        # --- Extract base symbol ---
+        base_symbol = symbol.replace("USDT", "").replace("usdt", "") if symbol else symbol
+
+        # --- 1. Noise filter ---
+        routing = self._check_noise_filters(symbol, direction, conf)
+        if routing == "skip":
+            return {"send": False, "tier": tier, "confidence": conf,
+                    "btc_aligned": True, "btc_tag": "", "penalties": ["noise_filter"]}
+
+        # --- 2. BTC alignment check ---
+        btc_aligned = True
+        btc_tag = ""
+        if base_symbol and base_symbol != "BTC":
+            btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+            if btc_spot:
+                btc_dir = btc_spot.cvd_direction
+                is_long = direction in ("LONG", "BUY", "BULLISH", "LONG_PREPARE")
+                if (is_long and btc_dir == "RISING") or (not is_long and btc_dir == "FALLING"):
+                    btc_aligned = True
+                    btc_tag = "BTC: ALIGNED ✅"
+                else:
+                    btc_aligned = False
+                    btc_tag = "BTC: DIVERGENT ⚠️"
+                    conf = max(55, conf - 5)
+                    tier = min(tier, 2)  # force Tier 2 max
+                    penalties.append("btc_divergent:-5")
+                    self.logger.info(
+                        f"PRE-GATE {symbol}: BTC DIVERGENT → conf -{5} ({conf:.0f}%), tier→{tier}"
+                    )
+
+        # --- 3. FR split detection ---
+        fpe = self.market_context_buffer.get_funding_per_exchange(base_symbol)
+        if fpe and fpe.rates:
+            sane_rates = [v for v in fpe.rates.values() if abs(v) < 0.01]
+            if len(sane_rates) >= 2:
+                has_positive = any(r > 0.0001 for r in sane_rates)
+                has_negative = any(r < -0.0001 for r in sane_rates)
+                if has_positive and has_negative:
+                    conf = max(55, conf - 3)
+                    penalties.append("fr_split:-3")
+                    self.logger.info(
+                        f"PRE-GATE {symbol}: FR split detected → conf -{3} ({conf:.0f}%)"
+                    )
+
+        # --- 4. Grade B → max Tier 2 ---
+        if grade == "B":
+            tier = min(tier, 2)
+
+        # --- 5. Confidence-based tier routing ---
+        if conf < 65:
+            return {"send": False, "tier": tier, "confidence": conf,
+                    "btc_aligned": btc_aligned, "btc_tag": btc_tag,
+                    "penalties": penalties + ["conf_below_65"]}
+        if conf < 72:
+            tier = min(tier, 2)  # Tier 3 only for ≥72
+
+        return {"send": True, "tier": tier, "confidence": conf,
+                "btc_aligned": btc_aligned, "btc_tag": btc_tag,
+                "penalties": penalties}
+
     async def _scan_rest_signals(self):
         """Scan all tracked symbols for REST-based signals (CVD flip, OI spike, whale)."""
         try:
@@ -1077,6 +1163,35 @@ class TeleglasPro:
                         send_telegram = False
                     else:
                         alert_tier = 3  # confirmed
+
+                # Tier routing: BTC divergent → Tier 2, FR split → penalty, conf <72 → Tier 2
+                if send_telegram:
+                    # BTC alignment check
+                    if base_symbol != "BTC":
+                        btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
+                        if btc_spot:
+                            btc_dir = btc_spot.cvd_direction
+                            is_long = signal.direction in ("LONG", "BUY", "BULLISH")
+                            btc_ok = (is_long and btc_dir == "RISING") or (not is_long and btc_dir == "FALLING")
+                            if not btc_ok:
+                                signal.confidence = max(55, signal.confidence - 5)
+                                alert_tier = min(alert_tier, 2)
+                                self.logger.info(f"PRE-GATE {symbol}: BTC DIVERGENT → conf -5 ({signal.confidence:.0f}%), tier→{alert_tier}")
+
+                    # FR split check
+                    fpe_check = self.market_context_buffer.get_funding_per_exchange(base_symbol)
+                    if fpe_check and fpe_check.rates:
+                        sane_r = [v for v in fpe_check.rates.values() if abs(v) < 0.01]
+                        if len(sane_r) >= 2:
+                            if any(r > 0.0001 for r in sane_r) and any(r < -0.0001 for r in sane_r):
+                                signal.confidence = max(55, signal.confidence - 3)
+                                self.logger.info(f"PRE-GATE {symbol}: FR split → conf -3 ({signal.confidence:.0f}%)")
+
+                    # Re-check confidence after penalties
+                    if signal.confidence < 65:
+                        send_telegram = False
+                    elif signal.confidence < 72:
+                        alert_tier = min(alert_tier, 2)  # Tier 3 only for ≥72
 
                 if send_telegram:
                     try:
@@ -1192,23 +1307,29 @@ class TeleglasPro:
                 if not msg:
                     continue
 
-                # Inject BTC macro label
-                if symbol and symbol != "BTC":
-                    btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
-                    if btc_spot:
-                        btc_dir = btc_spot.cvd_direction
-                        is_long = direction in ("LONG", "LONG_PREPARE")
-                        btc_tag = "BTC: ALIGNED ✅" if (
-                            (is_long and btc_dir == "RISING") or
-                            (not is_long and btc_dir == "FALLING")
-                        ) else "BTC: DIVERGENT ⚠️"
-                        msg += f"\n{btc_tag}"
+                # Pre-send gate: noise filter + BTC + FR + confidence
+                gate = self._pre_send_gate(
+                    symbol=symbol, direction=direction,
+                    confidence=alert.get("confidence", 65),
+                    grade=alert.get("grade", "B"), base_tier=1,
+                )
+                if not gate["send"]:
+                    self.logger.info(
+                        f"🔇 Tier1 BLOCKED: {alert.get('type')} {symbol} "
+                        f"{direction} penalties={gate['penalties']}"
+                    )
+                    continue
+
+                # Inject BTC tag from gate
+                if gate["btc_tag"] and symbol and symbol != "BTC":
+                    msg += f"\n{gate['btc_tag']}"
 
                 if self.telegram_router.enabled:
-                    await self.telegram_router.send_alert(msg, tier=1)
+                    await self.telegram_router.send_alert(msg, tier=gate["tier"])
                     self.stats['alerts_sent'] += 1
                 self.logger.info(
-                    f"⚡ Tier 1: {alert.get('type')} {symbol} {direction} → Tier 1"
+                    f"⚡ Tier 1: {alert.get('type')} {symbol} {direction} → Tier {gate['tier']}"
+                    f"{' [' + ','.join(gate['penalties']) + ']' if gate['penalties'] else ''}"
                 )
         except Exception as e:
             self.logger.error(f"Tier 1 detector error: {e}")
@@ -1224,23 +1345,28 @@ class TeleglasPro:
                 if not msg:
                     continue
 
-                # Inject BTC macro label
-                if base_symbol != "BTC":
-                    btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
-                    if btc_spot:
-                        btc_dir = btc_spot.cvd_direction
-                        is_long = divergence.direction == "LONG"
-                        btc_tag = "BTC: ALIGNED ✅" if (
-                            (is_long and btc_dir == "RISING") or
-                            (not is_long and btc_dir == "FALLING")
-                        ) else "BTC: DIVERGENT ⚠️"
-                        msg += f"\n{btc_tag}"
+                # Pre-send gate: noise filter + BTC + FR + confidence
+                gate = self._pre_send_gate(
+                    symbol=f"{base_symbol}USDT", direction=divergence.direction,
+                    confidence=divergence.confidence, grade="B", base_tier=2,
+                )
+                if not gate["send"]:
+                    self.logger.info(
+                        f"🔇 Tier2 BLOCKED: CVD_DIVERGENCE {base_symbol} "
+                        f"{divergence.direction} penalties={gate['penalties']}"
+                    )
+                    continue
+
+                # Inject BTC tag from gate
+                if gate["btc_tag"] and base_symbol != "BTC":
+                    msg += f"\n{gate['btc_tag']}"
 
                 if self.telegram_router.enabled:
-                    await self.telegram_router.send_alert(msg, tier=2)
+                    await self.telegram_router.send_alert(msg, tier=gate["tier"])
                     self.stats['alerts_sent'] += 1
                 self.logger.info(
-                    f"🔍 Tier 2: CVD_DIVERGENCE {base_symbol} {divergence.direction} → Tier 2"
+                    f"🔍 Tier 2: CVD_DIVERGENCE {base_symbol} {divergence.direction} → Tier {gate['tier']}"
+                    f"{' [' + ','.join(gate['penalties']) + ']' if gate['penalties'] else ''}"
                 )
         except Exception as e:
             self.logger.error(f"Tier 2 divergence detector error: {e}")
@@ -1588,36 +1714,61 @@ class TeleglasPro:
                             f"🔇 Signal noise-filtered: {symbol} {trading_signal.signal_type}"
                         )
                     else:
-                        formatted_message = self.message_formatter.format_signal(trading_signal)
-
-                        # Inject BTC macro label after first line
+                        # Tier routing: BTC divergent, FR split, confidence threshold
+                        ws_tier = 3
                         base_sym = to_base_symbol(symbol)
+
+                        # BTC alignment → DIVERGENT = -5 + Tier 2
+                        btc_tag = ""
                         if base_sym != "BTC":
                             btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
                             if btc_spot:
                                 btc_dir = btc_spot.cvd_direction
                                 is_long = trading_signal.direction in ("LONG", "BULLISH")
-                                if is_long:
-                                    btc_tag = "BTC: ALIGNED ✅" if btc_dir == "RISING" else "BTC: DIVERGENT ⚠️"
-                                else:
-                                    btc_tag = "BTC: ALIGNED ✅" if btc_dir == "FALLING" else "BTC: DIVERGENT ⚠️"
+                                btc_ok = (is_long and btc_dir == "RISING") or (not is_long and btc_dir == "FALLING")
+                                btc_tag = "BTC: ALIGNED ✅" if btc_ok else "BTC: DIVERGENT ⚠️"
+                                if not btc_ok:
+                                    trading_signal.confidence = max(55, trading_signal.confidence - 5)
+                                    ws_tier = min(ws_tier, 2)
+                                    self.logger.info(f"PRE-GATE {symbol}: BTC DIVERGENT → conf -5, tier→{ws_tier}")
+
+                        # FR split → -3
+                        fpe_ws = self.market_context_buffer.get_funding_per_exchange(base_sym)
+                        if fpe_ws and fpe_ws.rates:
+                            sane_ws = [v for v in fpe_ws.rates.values() if abs(v) < 0.01]
+                            if len(sane_ws) >= 2:
+                                if any(r > 0.0001 for r in sane_ws) and any(r < -0.0001 for r in sane_ws):
+                                    trading_signal.confidence = max(55, trading_signal.confidence - 3)
+                                    self.logger.info(f"PRE-GATE {symbol}: FR split → conf -3 ({trading_signal.confidence:.0f}%)")
+
+                        # Confidence gate after penalties
+                        if trading_signal.confidence < 65:
+                            self.logger.info(f"🔇 WS signal dropped below 65 after penalties: {symbol}")
+                        else:
+                            if trading_signal.confidence < 72:
+                                ws_tier = min(ws_tier, 2)
+
+                            formatted_message = self.message_formatter.format_signal(trading_signal)
+
+                            # Inject BTC tag after first line
+                            if btc_tag and base_sym != "BTC":
                                 lines = formatted_message.split("\n", 1)
                                 if len(lines) == 2:
                                     formatted_message = f"{lines[0]} | {btc_tag}\n{lines[1]}"
 
-                        # Route via TelegramRouter (Tier 3 = confirmed)
-                        if self.telegram_router.enabled:
-                            await self.telegram_router.send_alert(formatted_message, tier=3)
-                            self.stats['alerts_sent'] += 1
-                        else:
-                            await self.alert_queue.add(
-                                formatted_message,
-                                priority=trading_signal.priority
+                            # Route via TelegramRouter
+                            if self.telegram_router.enabled:
+                                await self.telegram_router.send_alert(formatted_message, tier=ws_tier)
+                                self.stats['alerts_sent'] += 1
+                            else:
+                                await self.alert_queue.add(
+                                    formatted_message,
+                                    priority=trading_signal.priority
+                                )
+                            self.logger.info(
+                                f"🎯 Signal sent: {symbol} {trading_signal.signal_type} "
+                                f"[context: {filter_result.assessment}] → Tier {ws_tier}"
                             )
-                        self.logger.info(
-                            f"🎯 Signal sent: {symbol} {trading_signal.signal_type} "
-                            f"[context: {filter_result.assessment}] → Tier 3"
-                        )
                 elif not filter_result.passed:
                     self.logger.info(
                         f"📡 Signal filtered by market context: {symbol} "
@@ -1894,16 +2045,30 @@ class TeleglasPro:
                         )
 
                         if msg and self.telegram_router.enabled:
-                            # Proactive = leading indicator = not confirmed → Tier 2
-                            await self.telegram_router.send_alert(msg, tier=2)
-                            self._proactive_cooldowns[base_symbol] = now.timestamp()
-                            self._proactive_hourly.append(now.timestamp())
-                            alerts_sent += 1
-                            self.stats['alerts_sent'] += 1
-                            self.logger.info(
-                                f"🔍 Proactive signal: {base_symbol} {direction} "
-                                f"{best.total:.0f}% ({best.label_text}) → Tier 2"
+                            # Pre-send gate: noise filter + BTC + FR + confidence
+                            p_gate = self._pre_send_gate(
+                                symbol=f"{base_symbol}USDT", direction=direction,
+                                confidence=best.total, grade="B", base_tier=2,
                             )
+                            if p_gate["send"]:
+                                # Inject BTC tag
+                                if p_gate["btc_tag"] and base_symbol != "BTC":
+                                    msg += f"\n{p_gate['btc_tag']}"
+                                await self.telegram_router.send_alert(msg, tier=p_gate["tier"])
+                                self._proactive_cooldowns[base_symbol] = now.timestamp()
+                                self._proactive_hourly.append(now.timestamp())
+                                alerts_sent += 1
+                                self.stats['alerts_sent'] += 1
+                                self.logger.info(
+                                    f"🔍 Proactive signal: {base_symbol} {direction} "
+                                    f"{best.total:.0f}% ({best.label_text}) → Tier {p_gate['tier']}"
+                                    f"{' [' + ','.join(p_gate['penalties']) + ']' if p_gate['penalties'] else ''}"
+                                )
+                            else:
+                                self.logger.info(
+                                    f"🔇 Proactive BLOCKED: {base_symbol} {direction} "
+                                    f"penalties={p_gate['penalties']}"
+                                )
 
                 if alerts_sent > 0:
                     self.logger.info(f"🔍 Proactive scan: {alerts_sent} alerts from {len(symbols)} coins")

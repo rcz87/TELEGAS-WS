@@ -220,6 +220,11 @@ def _grade_label(grade: str) -> str:
     return "GRADE C — INFO"
 
 
+def _grade_confidence(grade: str) -> float:
+    """Map grade to confidence score for pre-send gate."""
+    return {"A": 75.0, "B": 65.0, "C": 50.0}.get(grade, 50.0)
+
+
 def _action_text(grade: str, direction: str, spot_confirms: bool) -> str:
     """Return specific action text based on grade."""
     d = "LONG" if direction == "BUY" else "SHORT"
@@ -435,6 +440,7 @@ class MovementDetector:
             "coin": coin,
             "direction": d_label,
             "grade": grade,
+            "confidence": _grade_confidence(grade),
             "message": msg,
             "priority": 1 if grade == "A" else 2,
         }
@@ -521,6 +527,7 @@ class MovementDetector:
             "coin": coin,
             "direction": "SHORT",
             "grade": "A",
+            "confidence": _grade_confidence("A"),
             "message": msg,
             "priority": 1,
         }
@@ -607,6 +614,7 @@ class MovementDetector:
             "coin": coin,
             "direction": "LONG",
             "grade": grade,
+            "confidence": _grade_confidence(grade),
             "message": msg,
             "priority": 1,
         }
@@ -700,6 +708,7 @@ class MovementDetector:
                 "coin": coin,
                 "direction": "LONG" if current_side == "BUY" else "SHORT",
                 "grade": "A",
+                "confidence": _grade_confidence("A"),
                 "message": msg,
                 "priority": 1,
             })
@@ -791,6 +800,7 @@ class MovementDetector:
                         "coin": coin,
                         "direction": d_label,
                         "grade": grade,
+                        "confidence": _grade_confidence(grade),
                         "message": msg,
                         "priority": 1 if grade == "A" else 2,
                     })
