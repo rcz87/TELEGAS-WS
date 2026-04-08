@@ -18,41 +18,15 @@ logger = logging.getLogger(__name__)
 
 _WIB = timezone(timedelta(hours=7))
 
-# Minimum absolute taker net for a candle to count as "climactic"
-CLIMACTIC_THRESHOLDS = {
-    "BTC": 50_000_000,
-    "ETH": 20_000_000,
-    "SOL": 5_000_000,
-    "BNB": 5_000_000,
-    "XRP": 3_000_000,
-    "DOGE": 3_000_000,
-    "AVAX": 2_000_000,
-    "SUI": 2_000_000,
-    "LINK": 2_000_000,
-    "ADA": 2_000_000,
-}
-CLIMACTIC_DEFAULT = 2_000_000
-
-# Minimum peak sell/buy size for exhaustion to be valid
-# Below this = market is quiet, not exhaustion after dump
-EXHAUSTION_MIN_PEAK = {
-    "BTC": 50_000_000,
-    "ETH": 20_000_000,
-    "SOL": 5_000_000,
-    "BNB": 5_000_000,
-    "XRP": 3_000_000,
-    "DOGE": 3_000_000,
-    "AVAX": 2_000_000,
-    "SUI": 2_000_000,
-    "LINK": 2_000_000,
-    "ADA": 2_000_000,
-}
-EXHAUSTION_MIN_PEAK_DEFAULT = 2_000_000
+# RELATIVE THRESHOLDS — scaled to coin's own taker activity
+# Min peak = average_taker_1h * 3 (computed per coin from buffer)
+# Climactic = same (must be bigger than 3x avg to be "climactic")
+MIN_PEAK_MULTIPLIER = 3.0   # peak must be 3x avg taker to count
+CLIMACTIC_MULTIPLIER = 3.0  # climactic candle must be 3x avg
 
 EXHAUSTION_RATIO = 0.20  # current < 20% of 6h max = exhaustion
-# FutCVD tolerance: small negative delta is noise, not acceleration
-# Scaled per tier in _futcvd_tolerance()
-FUTCVD_TOLERANCE_DEFAULT = 200_000  # $200K
+# FutCVD tolerance = average_taker_1h * 0.1 (10% of avg = noise floor)
+FUTCVD_TOLERANCE_RATIO = 0.1
 EXHAUSTION_MIN_HISTORY = 12  # need at least 12 snapshots (~1h) of history
 COOLDOWN_SECONDS = 3600  # 60 min per symbol per pattern
 COMBO_WINDOW = 7200  # 2 hours for combo detection
@@ -100,15 +74,11 @@ class TakerSignalDetector:
         self._cooldowns[f"{symbol}_{pattern}"] = time.time()
 
     @staticmethod
-    def _futcvd_tolerance(symbol: str) -> float:
-        """FutCVD noise tolerance — small negative delta is not acceleration."""
-        tolerances = {
-            "BTC": 5_000_000,
-            "ETH": 2_000_000,
-            "SOL": 500_000,
-            "BNB": 500_000,
-        }
-        return tolerances.get(symbol, FUTCVD_TOLERANCE_DEFAULT)
+    def _avg_taker_abs(taker_nets: list) -> float:
+        """Average absolute taker net across buffer — represents this coin's typical activity."""
+        if not taker_nets:
+            return 0
+        return sum(abs(t) for t in taker_nets) / len(taker_nets)
 
     def _record_combo(self, symbol: str, pattern: str, direction: str):
         if symbol not in self._combo_history:
@@ -195,12 +165,16 @@ class TakerSignalDetector:
         max_buy = max(taker_nets)  # most positive
 
         alerts = []
-        threshold = CLIMACTIC_THRESHOLDS.get(symbol, CLIMACTIC_DEFAULT)
         PRIOR_MOVE_PCT = 2.0  # Must have moved >2% for context
 
-        # --- TIER 1A: SELL EXHAUSTION (requires prior dump >2%) ---
-        tolerance = self._futcvd_tolerance(symbol)
-        min_peak = EXHAUSTION_MIN_PEAK.get(symbol, EXHAUSTION_MIN_PEAK_DEFAULT)
+        # RELATIVE thresholds: based on this coin's avg taker activity
+        avg_taker = self._avg_taker_abs(taker_nets)
+        if avg_taker <= 0:
+            return []  # no taker data = nothing to detect
+
+        min_peak = avg_taker * MIN_PEAK_MULTIPLIER      # e.g. SOL avg $3M → min $9M
+        threshold = avg_taker * CLIMACTIC_MULTIPLIER     # climactic must be 3x avg
+        tolerance = avg_taker * FUTCVD_TOLERANCE_RATIO   # 10% of avg = noise
         if not self._on_cooldown(symbol, "SELL_EXHAUSTION") and max_sell < -min_peak and price_chg_6h < -PRIOR_MOVE_PCT:
             sell_ratio = abs(current_taker) / abs(max_sell) if current_taker < 0 else 0.0
             # Also trigger if current is slightly positive (seller completely gone)

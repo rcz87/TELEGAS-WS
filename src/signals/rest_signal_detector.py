@@ -40,15 +40,12 @@ CVD_MIN_DELTA = {
 # Minimum OI change % to trigger spike
 OI_MIN_CHANGE_PCT = 1.5
 
-# Minimum FutCVD total for stealth divergence (filter out noise)
-DIVERGENCE_MIN_TOTAL = {
-    "BTC": 50_000_000,
-    "ETH": 20_000_000,
-    "SOL": 5_000_000,
-    "BNB": 5_000_000,
-    "XRP": 3_000_000,
-    "default": 2_000_000,
-}
+# Divergence: FutCVD total must be > volume_24h * 0.1%
+DIVERGENCE_VOLUME_RATIO = 0.001  # 0.1% of 24h volume
+DIVERGENCE_ABS_FLOOR = 10_000    # absolute floor $10K (for micro coins)
+
+# CVD significance: SpotCVD must be > volume_24h * 0.01% to trigger flip
+CVD_SIGNIFICANCE_RATIO = 0.0001  # 0.01% of 24h volume
 
 # Minimum whale flow USD to trigger
 WHALE_MIN_FLOW = 1_000_000
@@ -128,6 +125,14 @@ class RestSignalDetector:
 
         if delta < min_delta:
             return None
+
+        # CVD significance: SpotCVD must be meaningful relative to coin volume
+        price_snap = self.buffer.get_latest_price(symbol)
+        vol_24h = price_snap.volume_24h if price_snap and hasattr(price_snap, 'volume_24h') else 0
+        if vol_24h > 0:
+            cvd_significance = abs(current.cvd_latest) / vol_24h
+            if cvd_significance < CVD_SIGNIFICANCE_RATIO:
+                return None  # CVD too small relative to volume
 
         # CVD VETO: for LONG signal, cumulative CVD must not be deeply negative
         if curr_dir == "RISING" and current.cvd_latest < 0:
@@ -237,8 +242,10 @@ class RestSignalDetector:
 
         signal = None
 
-        # Minimum FutCVD total to filter noise
-        min_total = DIVERGENCE_MIN_TOTAL.get(symbol, DIVERGENCE_MIN_TOTAL["default"])
+        # Minimum FutCVD total — relative to coin's 24h volume
+        div_price = self.buffer.get_latest_price(symbol)
+        div_vol = div_price.volume_24h if div_price and hasattr(div_price, 'volume_24h') else 0
+        min_total = max(div_vol * DIVERGENCE_VOLUME_RATIO, DIVERGENCE_ABS_FLOOR) if div_vol > 0 else DIVERGENCE_ABS_FLOOR
 
         # Price change check: stealth = price hasn't moved much yet
         # If price already moved >1% in signal direction, it's not stealth anymore
