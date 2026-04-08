@@ -116,15 +116,22 @@ def _fmts(value: float) -> str:
 
 
 def _cvd_deltas(cvd_snapshots: list) -> list[float]:
-    """Compute per-snapshot CVD deltas from consecutive snapshots."""
-    if len(cvd_snapshots) < 2:
+    """Return per-snapshot cvd_latest values (each is a single candle delta).
+
+    cvd_latest = the most recent candle's buy-sell delta in that snapshot.
+    Negative = sell candle, positive = buy candle.
+    We return the raw values so _consecutive_candles can check sign directly.
+    """
+    if not cvd_snapshots:
         return []
-    return [cvd_snapshots[i].cvd_latest - cvd_snapshots[i - 1].cvd_latest
-            for i in range(1, len(cvd_snapshots))]
+    return [s.cvd_latest for s in cvd_snapshots]
 
 
 def _consecutive_candles(deltas: list, direction: str) -> int:
-    """Count consecutive candles in same direction from the end."""
+    """Count consecutive candles in same direction from the end.
+
+    Each delta is a per-candle CVD value: negative = sell, positive = buy.
+    """
     count = 0
     for d in reversed(deltas):
         if direction == "SELL" and d < 0:
