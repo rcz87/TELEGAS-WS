@@ -870,7 +870,11 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
     try:
-        await ws.send_text(last_state)
+        if last_state:
+            json.loads(last_state)  # validate before sending
+            await ws.send_text(last_state)
+    except (json.JSONDecodeError, TypeError):
+        pass
     except Exception:
         pass
     try:
@@ -885,6 +889,11 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 async def broadcast(data: str):
+    # Validate JSON before sending to all clients — reject malformed payloads
+    try:
+        json.loads(data)
+    except (json.JSONDecodeError, TypeError):
+        return
     dead = set()
     for ws in clients:
         try:
