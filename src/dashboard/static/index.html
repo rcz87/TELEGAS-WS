@@ -31,8 +31,18 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 .timestamp{font-size:10px;color:var(--text3);}
 .status{font-size:10px;padding:2px 8px;border-radius:10px;font-weight:bold;}
 .status.live{background:var(--green-bg);color:var(--green);}
+.status.stale{background:var(--yellow-bg);color:var(--yellow);}
 .status.reconnecting{background:var(--yellow-bg);color:var(--yellow);}
 .status.offline{background:var(--red-bg);color:var(--red);}
+
+/* ===== STALE DATA OVERLAY ===== */
+#stale-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;z-index:500;pointer-events:none;}
+#stale-overlay.warn{display:block;background:rgba(251,191,36,0.04);}
+#stale-overlay.warn .stale-banner{background:var(--yellow-bg);border-color:var(--yellow);color:var(--yellow);}
+#stale-overlay.danger{display:block;background:rgba(248,113,113,0.08);}
+#stale-overlay.danger .stale-banner{background:var(--red-bg);border-color:var(--red);color:var(--red);}
+.stale-banner{position:fixed;top:38px;left:50%;transform:translateX(-50%);padding:6px 20px;border:1px solid;border-radius:8px;font-size:11px;font-weight:bold;font-family:inherit;letter-spacing:0.5px;z-index:501;white-space:nowrap;pointer-events:auto;backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);box-shadow:0 4px 12px rgba(0,0,0,0.4);animation:stalePulse 2s ease-in-out infinite;}
+@keyframes stalePulse{0%,100%{opacity:1;}50%{opacity:0.7;}}
 
 /* ===== BTC MACRO TICKER ===== */
 .btc-ticker{display:flex;gap:14px;padding:4px 16px;background:#080b12;border-bottom:1px solid var(--border);font-size:10px;color:var(--text3);flex-wrap:wrap;align-items:center;}
@@ -437,6 +447,9 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 </style>
 </head>
 <body>
+
+<!-- Stale data overlay -->
+<div id="stale-overlay"><div class="stale-banner" id="stale-banner"></div></div>
 
 <!-- ===== 1. HEADER ===== -->
 <div class="header">
@@ -2415,7 +2428,10 @@ function initChart(){if(typeof TradingView!=='undefined')updateChart(rightCoin);
 initChart();
 
 // ── WebSocket ────────────────────────────
-function setStatus(s){const el=document.getElementById('conn-status');el.textContent=s;el.className='status '+s.toLowerCase();}
+function setStatus(s){
+  const el=document.getElementById('conn-status');el.textContent=s;el.className='status '+s.toLowerCase();
+  if(s==='LIVE'){document.getElementById('stale-overlay').className='';}
+}
 function connect(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
   const base=location.pathname.replace(/\/+$/,'');
@@ -2446,19 +2462,31 @@ function connect(){
 setInterval(()=>{if(ws&&ws.readyState===1)ws.send('ping');},15000);
 connect();
 
-// ── Data Age Ticker (updates header every 1s) ──
+// ── Data Age Ticker (updates header + stale overlay every 1s) ──
 setInterval(()=>{
   if(!lastDataTime)return;
   const ageSec=Math.round((Date.now()-lastDataTime)/1000);
   const tsEl=document.getElementById('ts');
   const statusEl=document.getElementById('conn-status');
+  const overlay=document.getElementById('stale-overlay');
+  const banner=document.getElementById('stale-banner');
   if(ageSec<=5){
     tsEl.textContent=(lastState?lastState.timestamp:'--')+' (live)';
+    overlay.className='';
   }else if(ageSec<=30){
     tsEl.textContent=(lastState?lastState.timestamp:'--')+` (${ageSec}s ago)`;
+    overlay.className='';
+  }else if(ageSec<=120){
+    tsEl.textContent=(lastState?lastState.timestamp:'--')+` (${ageSec}s ago)`;
+    if(statusEl.textContent==='LIVE'){statusEl.textContent='STALE';statusEl.className='status stale';}
+    overlay.className='warn';
+    banner.textContent=`DATA STALE — ${ageSec}s tanpa update`;
   }else{
-    tsEl.textContent=(lastState?lastState.timestamp:'--')+` (${ageSec}s ago ⚠)`;
-    if(statusEl.textContent==='LIVE'){statusEl.textContent='STALE';statusEl.className='status reconnecting';}
+    const ageMin=Math.round(ageSec/60);
+    tsEl.textContent=(lastState?lastState.timestamp:'--')+` (${ageMin}m ago)`;
+    statusEl.textContent='STALE';statusEl.className='status offline';
+    overlay.className='danger';
+    banner.textContent=`DATA EXPIRED (${ageMin}m) — jangan ambil keputusan dari data ini`;
   }
   // Signal freshness client-side countdown
   if(sigData.primary&&sigData.primary.remaining_seconds>0){
