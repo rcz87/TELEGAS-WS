@@ -1081,11 +1081,11 @@ function updateFlowCard(d){
 
   // 5. Tags (flow + momentum)
   let flowTag,flowCls;
-  if(!aligned){flowTag='CONFLICT';flowCls='yellow';}
+  if(!dirAligned){flowTag='CONFLICT';flowCls='yellow';}
   else if(Math.abs(futSlope)>Math.abs(spotSlope)*1.5){flowTag='FUTURES LEADING';flowCls='blue';}
   else if(Math.abs(spotSlope)>Math.abs(futSlope)*1.5){flowTag='SPOT ACCUMULATION';flowCls='green';}
-  else if(aligned&&spotDir==='RISING'){flowTag='SYNCHRONIZED BUY';flowCls='green';}
-  else if(aligned&&spotDir==='FALLING'){flowTag='SYNCHRONIZED SELL';flowCls='red';}
+  else if(dirAligned&&spotDir==='RISING'){flowTag='SYNCHRONIZED BUY';flowCls='green';}
+  else if(dirAligned&&spotDir==='FALLING'){flowTag='SYNCHRONIZED SELL';flowCls='red';}
   else{flowTag='NEUTRAL';flowCls='gray';}
 
   const avgSlope=(Math.abs(spotSlope)+Math.abs(futSlope))/2;
@@ -1108,7 +1108,7 @@ function updateFlowCard(d){
   </div>`;
 
   // 7. AI insight
-  document.getElementById('ofi-insight').innerHTML=_flowInsight(flowTag,momTag,aligned,spotDir,futDir);
+  document.getElementById('ofi-insight').innerHTML=_flowInsight(flowTag,momTag,dirAligned,spotDir,futDir);
 }
 
 // ── Market Structure Intelligence: persistent DOM update ──
