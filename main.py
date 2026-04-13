@@ -2165,7 +2165,7 @@ class TeleglasPro:
                     except Exception:
                         pass
 
-                coins[base_symbol] = {
+                coin_data = {
                     "price": ctx.get('current_price', 0),
                     "change_24h": ctx.get('price_change_24h_pct', 0),
                     "volume_24h": ctx.get('volume_24h', 0),
@@ -2197,6 +2197,29 @@ class TeleglasPro:
                     "bias": "LONG" if score_long.total > score_short.total else "SHORT" if score_short.total > score_long.total else "NEUTRAL",
                     "updated": updated_str,
                 }
+
+                # Regime detection + sniper decision (backend-computed)
+                from src.analysis.regime_detector import detect_regime, compute_sniper_decision
+                regime_result = detect_regime(coin_data)
+                sniper = compute_sniper_decision(coin_data, regime_result["regime"], regime_result["conf"])
+                coin_data["regime"] = {
+                    "type": regime_result["regime"],
+                    "conf": regime_result["conf"],
+                    "scores": regime_result["scores"],
+                    "status": sniper["status"],
+                    "grade": sniper["grade"],
+                    "bias": sniper["bias"],
+                    "confidence": sniper["confidence"],
+                    "long_raw": sniper["long_raw"],
+                    "short_raw": sniper["short_raw"],
+                    "trigger": sniper["trigger"],
+                    "invalidation": sniper["invalidation"],
+                    "note": sniper["note"],
+                    "vetoed": sniper["vetoed"],
+                    "veto_reason": sniper["veto_reason"],
+                }
+
+                coins[base_symbol] = coin_data
 
             whale_alerts = getattr(self, '_recent_whale_alerts', [])
 
