@@ -74,6 +74,8 @@ class RestSignalDetector:
 
         # Track previous whale net to detect changes (avoid static repeats)
         self._prev_whale_net: Dict[str, float] = {}  # symbol → last net_long - net_short
+        # Separate cooldown tracker for CVD divergence signals
+        self._divergence_cooldowns: Dict[str, float] = {}  # "{symbol}_CVD_DIVERGENCE" → timestamp
 
     def _get_tier(self, symbol: str) -> str:
         if symbol in self._tier1:
@@ -193,7 +195,7 @@ class RestSignalDetector:
         # Cooldown check
         cd_key = f"{symbol}_CVD_DIVERGENCE"
         now = time.time()
-        if now - self._prev_whale_net.get(cd_key, 0) < self.DIVERGENCE_COOLDOWN:
+        if now - self._divergence_cooldowns.get(cd_key, 0) < self.DIVERGENCE_COOLDOWN:
             return None
 
         # FutCVD deltas
@@ -287,8 +289,7 @@ class RestSignalDetector:
                         )
 
         if signal:
-            # Use _prev_whale_net dict for cooldown (reusing existing dict)
-            self._prev_whale_net[cd_key] = now
+            self._divergence_cooldowns[cd_key] = now
 
         return signal
 

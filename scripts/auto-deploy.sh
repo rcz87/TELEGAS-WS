@@ -73,15 +73,15 @@ if git diff --name-only "$LOCAL_HEAD" "$REMOTE_HEAD" | grep -q "requirements.txt
     pip3 install -r requirements.txt --break-system-packages --quiet 2>/dev/null || true
 fi
 
-# Sync dashboard files to production location
+# Ensure dashboard symlinks (idempotent — creates if missing, no-op if already correct)
 DASHBOARD_CHANGED=false
 if git diff --name-only "$LOCAL_HEAD" "$REMOTE_HEAD" | grep -q "src/dashboard/"; then
     DASHBOARD_CHANGED=true
-    log "Dashboard files changed, syncing to $DASHBOARD_DEST..."
-    cp "$REPO_DIR/src/dashboard/server.py" "$DASHBOARD_DEST/server.py"
-    cp "$REPO_DIR/src/dashboard/static/index.html" "$DASHBOARD_DEST/static/index.html"
-    # Copy service worker if it exists
-    [ -f "$REPO_DIR/src/dashboard/static/sw.js" ] && cp "$REPO_DIR/src/dashboard/static/sw.js" "$DASHBOARD_DEST/static/sw.js"
+    log "Dashboard files changed, ensuring symlinks to $DASHBOARD_DEST..."
+    # Replace files with symlinks if they aren't already
+    [ ! -L "$DASHBOARD_DEST/server.py" ] && rm -f "$DASHBOARD_DEST/server.py" && ln -s "$REPO_DIR/src/dashboard/server.py" "$DASHBOARD_DEST/server.py"
+    [ ! -L "$DASHBOARD_DEST/static/index.html" ] && rm -f "$DASHBOARD_DEST/static/index.html" && ln -s "$REPO_DIR/src/dashboard/static/index.html" "$DASHBOARD_DEST/static/index.html"
+    [ -f "$REPO_DIR/src/dashboard/static/sw.js" ] && [ ! -L "$DASHBOARD_DEST/static/sw.js" ] && rm -f "$DASHBOARD_DEST/static/sw.js" && ln -s "$REPO_DIR/src/dashboard/static/sw.js" "$DASHBOARD_DEST/static/sw.js"
 fi
 
 # Restart services

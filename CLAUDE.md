@@ -10,11 +10,10 @@ Real-time cryptocurrency trading intelligence system. Detects stop hunts, order 
 - **Frontend**: `src/dashboard/static/index.html` — single-file PWA with TradingView charts
 
 ## Critical Deployment Detail
-PM2 runs `/root/tg-dashboard/server.py`, NOT the repo copy.
-After editing dashboard files, **always sync**:
+PM2 runs `/root/tg-dashboard/server.py`, which is a **symlink** to the repo copy.
+No manual sync needed — editing repo files updates production automatically.
+After editing dashboard files, just restart:
 ```bash
-cp /root/TELEGAS-WS/src/dashboard/server.py /root/tg-dashboard/server.py
-cp /root/TELEGAS-WS/src/dashboard/static/index.html /root/tg-dashboard/static/index.html
 pm2 restart tg-dashboard
 ```
 Main system: `pm2 restart teleglas`

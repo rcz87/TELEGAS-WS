@@ -44,10 +44,13 @@ if _config_path.exists():
 
 _raw_token = _dashboard_config.get("api_token", "")
 # Reject placeholder token — treat as no auth (force user to set real token)
-if _raw_token and "GANTI" in _raw_token.upper():
+if not _raw_token or "GANTI" in _raw_token.upper():
     logging.getLogger("DashboardAPI").warning(
-        "api_token is still the default placeholder — auth DISABLED. "
-        "Set a real token in config/config.yaml -> dashboard.api_token"
+        "=" * 60 + "\n"
+        "  ⚠️  DASHBOARD AUTH DISABLED — NO API TOKEN SET!\n"
+        "  Anyone with the URL can access all endpoints.\n"
+        "  Set a real token: config/config.yaml → dashboard.api_token\n" +
+        "=" * 60
     )
     _raw_token = ""
 API_TOKEN = _raw_token

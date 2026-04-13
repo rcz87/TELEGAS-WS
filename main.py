@@ -1155,43 +1155,23 @@ class TeleglasPro:
                         if signal.confidence < 65:
                             send_telegram = False
 
-                # Noise filters: anti-flip, directional consistency, min confidence
+                # Centralized gate: noise filter + BTC + FR split + confidence routing
                 alert_tier = 3  # default: confirmed
+                gate = None
                 if send_telegram:
-                    routing = self._check_noise_filters(symbol, signal.direction, signal.confidence)
-                    if routing == "skip":
+                    gate = self._pre_send_gate(
+                        symbol=symbol, direction=signal.direction,
+                        confidence=signal.confidence, grade="A", base_tier=3,
+                    )
+                    if not gate["send"]:
                         send_telegram = False
+                        self.logger.info(
+                            f"🔇 REST BLOCKED: {signal.signal_type} {symbol} "
+                            f"{signal.direction} penalties={gate['penalties']}"
+                        )
                     else:
-                        alert_tier = 3  # confirmed
-
-                # Tier routing: BTC divergent → Tier 2, FR split → penalty, conf <72 → Tier 2
-                if send_telegram:
-                    # BTC alignment check
-                    if base_symbol != "BTC":
-                        btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
-                        if btc_spot:
-                            btc_dir = btc_spot.cvd_direction
-                            is_long = signal.direction in ("LONG", "BUY", "BULLISH")
-                            btc_ok = (is_long and btc_dir == "RISING") or (not is_long and btc_dir == "FALLING")
-                            if not btc_ok:
-                                signal.confidence = max(55, signal.confidence - 5)
-                                alert_tier = min(alert_tier, 2)
-                                self.logger.info(f"PRE-GATE {symbol}: BTC DIVERGENT → conf -5 ({signal.confidence:.0f}%), tier→{alert_tier}")
-
-                    # FR split check
-                    fpe_check = self.market_context_buffer.get_funding_per_exchange(base_symbol)
-                    if fpe_check and fpe_check.rates:
-                        sane_r = [v for v in fpe_check.rates.values() if abs(v) < 0.01]
-                        if len(sane_r) >= 2:
-                            if any(r > 0.0001 for r in sane_r) and any(r < -0.0001 for r in sane_r):
-                                signal.confidence = max(55, signal.confidence - 3)
-                                self.logger.info(f"PRE-GATE {symbol}: FR split → conf -3 ({signal.confidence:.0f}%)")
-
-                    # Re-check confidence after penalties
-                    if signal.confidence < 65:
-                        send_telegram = False
-                    elif signal.confidence < 72:
-                        alert_tier = min(alert_tier, 2)  # Tier 3 only for ≥72
+                        alert_tier = gate["tier"]
+                        signal.confidence = gate["confidence"]
 
                 if send_telegram:
                     try:
@@ -1211,16 +1191,8 @@ class TeleglasPro:
                         price_str = f"${price_snap.price:,.4f}" if price_snap else "N/A"
                         chg_str = f"{price_snap.change_24h_pct:+.1f}%" if price_snap else ""
 
-                        # BTC macro label — check BTC SpotCVD direction
-                        btc_label = ""
-                        if base_symbol != "BTC":
-                            btc_spot = self.market_context_buffer.get_latest_spot_cvd("BTC")
-                            if btc_spot:
-                                btc_dir = btc_spot.cvd_direction
-                                if signal.direction == "LONG":
-                                    btc_label = " | BTC: ALIGNED ✅" if btc_dir == "RISING" else " | BTC: DIVERGENT ⚠️"
-                                else:  # SHORT
-                                    btc_label = " | BTC: ALIGNED ✅" if btc_dir == "FALLING" else " | BTC: DIVERGENT ⚠️"
+                        # BTC macro label — use gate result (already computed)
+                        btc_label = f" | {gate['btc_tag']}" if gate and gate.get("btc_tag") else ""
 
                         lines = [
                             f"{display_symbol(symbol)} | {price_str} | {_now}",
@@ -2141,12 +2113,12 @@ class TeleglasPro:
                 fut_spark = prev.get('fut_cvd_spark', [])
 
                 if spot_val is not None:
-                    if not spot_spark or abs(spot_spark[-1] - spot_val) > 0.01:
+                    if not spot_spark or abs(spot_spark[-1] - spot_val) / max(abs(spot_spark[-1]), 1) > 0.001:
                         spot_spark.append(spot_val)
                     spot_spark = spot_spark[-20:]
 
                 if fut_val is not None:
-                    if not fut_spark or abs(fut_spark[-1] - fut_val) > 0.01:
+                    if not fut_spark or abs(fut_spark[-1] - fut_val) / max(abs(fut_spark[-1]), 1) > 0.001:
                         fut_spark.append(fut_val)
                     fut_spark = fut_spark[-20:]
 
