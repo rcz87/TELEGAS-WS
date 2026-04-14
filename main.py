@@ -1083,6 +1083,7 @@ class TeleglasPro:
                 self.stats["signals_generated"] += 1
 
                 # Persist REST signal to database for ML training
+                db_id = 0
                 try:
                     price_snap = self.market_context_buffer.get_latest_price(base_symbol)
                     rest_price = price_snap.price if price_snap else 0
@@ -1091,7 +1092,7 @@ class TeleglasPro:
                     rest_entry = rest_price
                     rest_sl = (rest_entry - rest_risk if is_long else rest_entry + rest_risk) if rest_risk > 0 else 0
                     rest_tp = (rest_entry + rest_risk * 2 if is_long else rest_entry - rest_risk * 2) if rest_risk > 0 else 0
-                    await self.db.save_signal(
+                    db_id = await self.db.save_signal(
                         symbol=symbol,
                         signal_type=signal.signal_type,
                         direction=signal.direction,
@@ -1100,6 +1101,33 @@ class TeleglasPro:
                         stop_loss=rest_sl,
                         target_price=rest_tp,
                     )
+
+                    # Track for outcome evaluation (feeds confidence_scorer + feature_logger.update_outcome)
+                    if rest_entry > 0 and db_id:
+                        signal.symbol = symbol  # ensure full pair for buffer lookups
+                        tracked = self.signal_tracker.track_signal(
+                            signal, rest_entry, rest_sl, rest_tp,
+                            setup_key=f"{signal.signal_type}|{signal.direction}|REST",
+                        )
+                        tracked._db_id = db_id
+
+                    # Log full feature snapshot for ML training (was missing — caused 0 WIN in signal_features)
+                    if db_id:
+                        try:
+                            features = self.feature_logger.extract_features(
+                                signal=signal,
+                                symbol=symbol,
+                                setup_key=f"{signal.signal_type}|{signal.direction}|REST",
+                                base_confidence=signal.confidence,
+                                adjusted_confidence=signal.confidence,
+                                final_confidence=signal.confidence,
+                                filter_assessment="",
+                                leading_score=0,
+                                signal_id=db_id,
+                            )
+                            await self.feature_logger.log_signal(features)
+                        except Exception as e:
+                            self.logger.debug(f"REST feature logging error: {e}")
                 except Exception as e:
                     self.logger.debug(f"REST signal DB save error: {e}")
 
@@ -2606,6 +2634,29 @@ class TeleglasPro:
                         )
             except Exception as e:
                 self.logger.error(f"Calibration rebuild error: {e}")
+
+            # Auto-train ML model every N hours (if enough new data)
+            try:
+                latest_meta = ModelTrainer.get_latest_meta()
+                hours_since_train = 999
+                if latest_meta and latest_meta.get('trained_at'):
+                    hours_since_train = (time.time() - latest_meta['trained_at']) / 3600
+
+                retrain_interval = self.config.get('ml', {}).get('retrain_interval_hours', 24)
+                if hours_since_train >= retrain_interval:
+                    self.logger.info("🧠 Starting periodic ML training...")
+                    result = await self.model_trainer.train()
+                    if result:
+                        self.ml_engine.load_model()
+                        self.logger.info(
+                            f"🧠 ML model trained: {result['metrics']['model_type']} "
+                            f"AUC={result['metrics'].get('auc', 0):.3f} "
+                            f"samples={result['metrics']['n_samples']}"
+                        )
+                    else:
+                        self.logger.info("🧠 ML training skipped (insufficient data)")
+            except Exception as e:
+                self.logger.error(f"ML training error: {e}")
 
     async def run(self):
         """Run the complete system"""

@@ -50,6 +50,7 @@ signal_lifecycle:
 ml:
   mode: "shadow"                   # "off" | "shadow" | "blended" | "advisory"
   weight: 0.3                      # ML weight in blended mode (0-1, rest is rule-based)
+  retrain_interval_hours: 24       # Auto-retrain cadence (cleanup_task runs hourly, skips if fresh)
 
 # Alert Settings
 alerts:
