@@ -609,6 +609,12 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
   <div id="mf-blockers" style="font-size:12px;color:var(--text2);margin-top:10px;line-height:1.5;display:none;"></div>
 </div>
 
+<!-- Signal Track Record -->
+<div class="regime-card" id="track-record-card" style="margin-top:8px;">
+  <div style="font-size:11px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">SIGNAL TRACK RECORD</div>
+  <div id="track-record-body" style="font-size:13px;color:var(--text2);line-height:1.6;">Loading…</div>
+</div>
+
 </div><!-- /tab-decision -->
 
 <!-- ===== TAB: ORDERFLOW ===== -->
@@ -2604,6 +2610,61 @@ function selectCoin(coin){
   if(lastState)render(lastState);
   updateChart(rightCoin);
   requestCoinData(rightCoin);
+  loadTrackRecord(rightCoin);
+  maybeAutoAI(rightCoin);
+}
+
+// ── V6 Phase 2: Track Record + Auto-AI ──
+const _trackCache={};
+async function loadTrackRecord(coin){
+  const box=document.getElementById('track-record-body');
+  if(!box)return;
+  const cached=_trackCache[coin];
+  if(cached&&(Date.now()-cached.ts)<120000){box.innerHTML=cached.html;return;}
+  box.innerHTML='<span style="color:var(--text4)">Loading…</span>';
+  try{
+    const r=await fetch(base+'/api/track-record/'+coin);
+    const d=await r.json();
+    const ov=d.overall||{}, r7=d.last_7d||{}, ls=d.last_signal;
+    if(!ov.total){box.innerHTML='<span style="color:var(--text4)">No historical signals for '+coin+'.</span>';return;}
+    const wrPct=v=>v==null?'--':(Math.round(v*1000)/10).toFixed(1)+'%';
+    const wrCls=v=>v>=0.6?'pos':v>=0.4?'':'neg';
+    const _resolved=ov.wins+ov.partial+ov.losses;
+    const _r7res=r7.wins+r7.partial+r7.losses;
+    let html=`<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;">`;
+    html+=`<span><span style="color:var(--text4)">Overall:</span> <b class="${wrCls(ov.win_rate)}">${ov.wins+ov.partial}W / ${ov.losses}L</b> <span class="${wrCls(ov.win_rate)}">(${wrPct(ov.win_rate)})</span> <span style="color:var(--text4)">• ${_resolved} resolved</span></span>`;
+    if(r7.total)html+=`<span><span style="color:var(--text4)">Last 7d:</span> <b class="${wrCls(r7.win_rate)}">${r7.wins+r7.partial}W / ${r7.losses}L</b> <span class="${wrCls(r7.win_rate)}">(${wrPct(r7.win_rate)})</span></span>`;
+    html+=`</div>`;
+    if(ls){
+      const outCls=ls.outcome==='WIN'||ls.outcome==='PARTIAL'?'pos':ls.outcome==='LOSS'?'neg':'';
+      const dirCls=ls.direction==='LONG'?'pos':'neg';
+      const pnl=ls.pnl_pct!=null?(ls.pnl_pct>=0?'+':'')+ls.pnl_pct.toFixed(2)+'%':'';
+      const ago=ls.created_at?Math.round((Date.now()/1000-ls.created_at)/3600):null;
+      const agoStr=ago!=null?(ago<24?ago+'h ago':Math.round(ago/24)+'d ago'):'';
+      html+=`<div style="margin-top:6px;font-size:12px;color:var(--text3);">Last: <span class="${dirCls}">${ls.signal_type} ${ls.direction}</span> ${Math.round(ls.confidence)}% → <b class="${outCls}">${ls.outcome}</b> <span class="${outCls}">${pnl}</span> <span style="color:var(--text4)">${agoStr}</span></div>`;
+    }
+    _trackCache[coin]={html,ts:Date.now()};
+    box.innerHTML=html;
+  }catch(e){
+    box.innerHTML='<span style="color:var(--text4)">Track record unavailable.</span>';
+  }
+}
+
+async function maybeAutoAI(coin){
+  // Auto-run AI if no fresh cache (<5 min old)
+  const cached=aiCache[coin];
+  if(cached&&(Date.now()-cached.ts)<300000)return; // cache fresh
+  const btn=document.getElementById('ai-btn');
+  if(!btn||btn.disabled)return;
+  // Only auto-run if server-side key is available (don't prompt user for key)
+  try{
+    const st=await fetch(base+'/api/ai-status').then(r=>r.json());
+    if(!st||!st.configured)return; // no server key → user must click manually
+    // Wait a moment for coin data to settle before analyzing
+    setTimeout(()=>{
+      if(rightCoin===coin){try{runAiAnalysis();}catch(e){}}
+    },1500);
+  }catch(e){}
 }
 
 // Init pills
@@ -2691,7 +2752,7 @@ function connect(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
   const base=location.pathname.replace(/\/+$/,'');
   ws=new WebSocket(proto+'//'+location.host+base+'/ws');
-  ws.onopen=()=>{setStatus('LIVE');if(reconnectTimer){clearInterval(reconnectTimer);reconnectTimer=null;}requestCoinData(rightCoin);ws.send(JSON.stringify({action:'get_whale_positions'}));};
+  ws.onopen=()=>{setStatus('LIVE');if(reconnectTimer){clearInterval(reconnectTimer);reconnectTimer=null;}requestCoinData(rightCoin);ws.send(JSON.stringify({action:'get_whale_positions'}));try{loadTrackRecord(rightCoin);maybeAutoAI(rightCoin);}catch(e){}};
   ws.onmessage=e=>{
     try{
       const msg=JSON.parse(e.data);

@@ -1201,6 +1201,63 @@ async def proxy_signals_lifecycle():
     except Exception:
         return JSONResponse({"coins": {}, "stats": {}})
 
+@app.get("/api/track-record/{symbol}")
+async def track_record(symbol: str):
+    """Signal win/loss history for a coin — overall + last 7d + last signal."""
+    db_path = Path(__file__).resolve().parent.parent.parent / "data" / "teleglas.db"
+    if not db_path.exists():
+        return JSONResponse({"symbol": symbol, "overall": {}, "last_7d": {}, "last_signal": None})
+    try:
+        con = sqlite3.connect(str(db_path))
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+
+        def _bucket(rows):
+            n = len(rows)
+            wins = sum(1 for r in rows if r["outcome"] == "WIN")
+            partial = sum(1 for r in rows if r["outcome"] == "PARTIAL")
+            losses = sum(1 for r in rows if r["outcome"] == "LOSS")
+            neutral = sum(1 for r in rows if r["outcome"] == "NEUTRAL")
+            resolved = wins + partial + losses
+            win_rate = (wins + partial) / resolved if resolved else 0.0
+            return {
+                "total": n, "wins": wins, "partial": partial, "losses": losses,
+                "neutral": neutral, "resolved": resolved, "win_rate": round(win_rate, 3),
+            }
+
+        cur.execute(
+            "SELECT outcome FROM signals WHERE symbol=? AND outcome IS NOT NULL",
+            (symbol,),
+        )
+        all_rows = cur.fetchall()
+
+        cur.execute(
+            "SELECT outcome FROM signals WHERE symbol=? AND outcome IS NOT NULL "
+            "AND created_at > strftime('%s','now') - 7*86400",
+            (symbol,),
+        )
+        recent_rows = cur.fetchall()
+
+        cur.execute(
+            "SELECT signal_type, direction, confidence, outcome, pnl_pct, created_at "
+            "FROM signals WHERE symbol=? AND outcome IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 1",
+            (symbol,),
+        )
+        last = cur.fetchone()
+        last_signal = dict(last) if last else None
+
+        con.close()
+        return JSONResponse({
+            "symbol": symbol,
+            "overall": _bucket(all_rows),
+            "last_7d": _bucket(recent_rows),
+            "last_signal": last_signal,
+        })
+    except Exception as e:
+        return JSONResponse({"symbol": symbol, "error": str(e), "overall": {}, "last_7d": {}, "last_signal": None})
+
+
 @app.get("/api/calibration")
 async def proxy_calibration():
     """Proxy to legacy API: confidence calibration table."""
