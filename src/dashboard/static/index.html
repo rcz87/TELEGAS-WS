@@ -2429,18 +2429,27 @@ function renderDecisionBar(d){
   const regimeBuilding=(regime==='ACCUMULATION'||regime==='DISTRIBUTION');
 
   // Pre-compute R:R from liquidation clusters (may be null if no data)
+  // IMPORTANT: liq.above/below are labeled relative to the price at fetch time.
+  // Since price moves, re-derive above/below from the live entry to avoid
+  // SL landing on the wrong side (e.g. SL above entry on a LONG).
   const liq=ws3Data.liq_cluster;
-  const hasLiq=liq&&liq.above&&liq.above.price>0&&liq.below&&liq.below.price>0;
+  const pA=(liq&&liq.above&&liq.above.price)||0;
+  const pB=(liq&&liq.below&&liq.below.price)||0;
+  const hasLiq=pA>0&&pB>0;
   const isLong=bias==='LONG';
+  const liqHigh=Math.max(pA,pB), liqLow=Math.min(pA,pB);
+  // Valid when one cluster sits on each side of entry
+  const liqValid=hasLiq&&price>0&&liqLow<price&&liqHigh>price;
   let entry=price, sl=0, tp=0, rr=0, tpTooClose=false;
-  if(hasLiq&&bias&&bias!=='NEUTRAL'){
-    sl=isLong?liq.below.price:liq.above.price;
-    tp=isLong?liq.above.price:liq.below.price;
+  if(liqValid&&bias&&bias!=='NEUTRAL'){
+    sl=isLong?liqLow:liqHigh;
+    tp=isLong?liqHigh:liqLow;
     const risk=Math.abs(entry-sl), reward=Math.abs(tp-entry);
     rr=risk>0?(reward/risk):0;
     tpTooClose=entry>0&&(Math.abs(tp-entry)/entry)<0.001;
   }
-  const lowRR=hasLiq&&bias&&bias!=='NEUTRAL'&&(rr<0.5||tpTooClose);
+  const slInvalid=hasLiq&&bias&&bias!=='NEUTRAL'&&!liqValid;
+  const lowRR=liqValid&&bias&&bias!=='NEUTRAL'&&(rr<0.5||tpTooClose);
 
   // Derive verdict
   let verdict, emoji, cls, barCls, detail;
@@ -2476,8 +2485,16 @@ function renderDecisionBar(d){
   vEl.innerHTML=`<span class="dec-emoji">${emoji}</span><span>${verdict}</span>`;
   dEl.innerHTML=detail;
 
-  // Entry / SL / TP — only show if verdict is actionable (not SKIP/WATCH) and R:R valid
-  if(cls==='v-skip'||cls==='v-watch'||!hasLiq||!bias||bias==='NEUTRAL'){
+  // Entry / SL / TP — only show if verdict is actionable (not SKIP/WATCH) and liq valid
+  if(cls==='v-skip'||cls==='v-watch'||!bias||bias==='NEUTRAL'){
+    rEl.innerHTML='';
+    return;
+  }
+  if(slInvalid){
+    rEl.innerHTML=`<span class="dec-rr" style="background:var(--red-bg);color:var(--red)">SL invalid — liq both sides of ${isLong?'LONG':'SHORT'}</span>`;
+    return;
+  }
+  if(!liqValid){
     rEl.innerHTML='';
     return;
   }
