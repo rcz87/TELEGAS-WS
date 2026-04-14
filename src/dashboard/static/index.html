@@ -83,7 +83,16 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 
 /* ===== CHART ===== */
 .chart-section{border-bottom:1px solid var(--border);overflow:hidden;position:relative;}
-.chart-body{height:350px;background:#080b12;}
+.chart-body{height:500px;background:#080b12;}
+
+/* ===== TAB NAVIGATION (V6) ===== */
+#tab-bar{position:sticky;top:0;z-index:40;display:flex;gap:2px;padding:0 8px;background:rgba(10,14,23,0.95);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--border);overflow-x:auto;scrollbar-width:none;touch-action:pan-x;}
+#tab-bar::-webkit-scrollbar{display:none;}
+.tab-btn{font-family:inherit;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:1px;padding:12px 18px;background:transparent;border:none;border-bottom:2px solid transparent;color:#888;cursor:pointer;white-space:nowrap;transition:color .15s,border-color .15s;}
+.tab-btn:hover{color:var(--text);}
+.tab-btn.active{color:#00ff88;border-bottom-color:#00ff88;}
+.tab-content{display:none;}
+.tab-content.active{display:block;}
 
 /* ===== DECISION BAR ===== */
 #decision-bar{position:sticky;top:0;z-index:50;padding:10px 16px;background:rgba(10,14,23,0.92);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--border);border-left:4px solid var(--text4);display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;transition:border-left-color .3s;}
@@ -533,12 +542,27 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
   <div class="dec-right" id="dec-right"></div>
 </div>
 
-<!-- ===== 5. TRADINGVIEW CHART (MAIN FOCUS) ===== -->
+<!-- ===== TAB BAR (V6) ===== -->
+<div id="tab-bar">
+  <button class="tab-btn active" data-tab="decision">Decision</button>
+  <button class="tab-btn" data-tab="chart">Chart</button>
+  <button class="tab-btn" data-tab="orderflow">Orderflow</button>
+  <button class="tab-btn" data-tab="structure">Structure</button>
+  <button class="tab-btn" data-tab="whale">Whale</button>
+  <button class="tab-btn" data-tab="signals">Signals</button>
+</div>
+
+<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+
+<!-- ===== TAB: CHART ===== -->
+<div class="tab-content" id="tab-chart">
 <div class="chart-section">
   <div class="chart-body" id="tv-chart"></div>
 </div>
-<script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+</div>
 
+<!-- ===== TAB: DECISION ===== -->
+<div class="tab-content active" id="tab-decision">
 <!-- ===== 6A. REGIME + SNIPER DECISION ===== -->
 <div class="regime-card r-rng" id="regime-card">
   <div class="reg-top">
@@ -578,7 +602,17 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
   <div id="ai-result" style="display:none;margin-top:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:11px;line-height:1.5;white-space:pre-wrap;color:var(--text2);max-height:400px;overflow-y:auto;"></div>
 </div>
 
-<!-- ===== 6B. ANALYSIS GRID — SELECTED COIN ===== -->
+<!-- Entry Checklist (moved from Money Flow) -->
+<div class="regime-card" style="margin-top:8px;">
+  <div style="font-size:11px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">ENTRY CHECKLIST</div>
+  <div class="mf-checklist" id="mf-checklist"></div>
+  <div id="mf-blockers" style="font-size:12px;color:var(--text2);margin-top:10px;line-height:1.5;display:none;"></div>
+</div>
+
+</div><!-- /tab-decision -->
+
+<!-- ===== TAB: ORDERFLOW ===== -->
+<div class="tab-content" id="tab-orderflow">
 <div style="padding:10px 16px 0;"><span style="font-size:10px;color:var(--text4);text-transform:uppercase;letter-spacing:1px;" id="analysis-label">ANALYSIS: --</span></div>
 
 <div class="analysis" id="analysis-grid">
@@ -622,8 +656,19 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
       <div class="ofi-insight" id="ofi-insight">Waiting for data...</div>
     </div>
   </div>
-  <!-- B: MARKET STRUCTURE INTELLIGENCE (persistent DOM) -->
-  <div class="card" id="card-market">
+  <!-- C: TAKER + L/S -->
+  <div class="card" id="card-taker"></div>
+  <!-- F: CVD HISTORY -->
+  <div class="card" id="card-cvd"></div>
+</div>
+
+</div><!-- /tab-orderflow -->
+
+<!-- ===== TAB: STRUCTURE ===== -->
+<div class="tab-content" id="tab-structure">
+<div class="analysis">
+  <!-- MARKET STRUCTURE INTELLIGENCE (persistent DOM) -->
+  <div class="card" id="card-market" style="grid-column:span 3">
     <div class="msi">
       <div class="msi-header">
         <span class="msi-title">MARKET STRUCTURE</span>
@@ -654,12 +699,8 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
       <div class="msi-insight" id="msi-insight">Waiting for data...</div>
     </div>
   </div>
-  <!-- C: TAKER + L/S -->
-  <div class="card" id="card-taker"></div>
-  <!-- E: LIQUIDITY -->
-  <div class="card" id="card-liq"></div>
-  <!-- F: CVD HISTORY -->
-  <div class="card" id="card-cvd"></div>
+  <!-- LIQUIDITY -->
+  <div class="card" id="card-liq" style="grid-column:span 3"></div>
 </div>
 
 <!-- ===== 6C. MONEY FLOW INTELLIGENCE ===== -->
@@ -706,12 +747,7 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
       <div class="mf-state-evidence" id="mf-market-evidence">Waiting for data...</div>
     </div>
 
-    <!-- Entry Checklist -->
-    <div style="margin-top:6px;">
-      <div style="font-size:11px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;">ENTRY CHECKLIST</div>
-      <div class="mf-checklist" id="mf-checklist"></div>
-      <div id="mf-blockers" style="font-size:12px;color:var(--text2);margin-top:8px;line-height:1.5;display:none;"></div>
-    </div>
+    <!-- Entry Checklist moved to Decision tab -->
 
     <!-- Funding State -->
     <div class="mf-funding" id="mf-funding">
@@ -723,6 +759,10 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
   </div>
 </div>
 
+</div><!-- /tab-structure -->
+
+<!-- ===== TAB: WHALE ===== -->
+<div class="tab-content" id="tab-whale">
 <!-- ===== 7. WHALE INTELLIGENCE ===== -->
 <div class="whale-section">
   <div class="whale-card">
@@ -781,6 +821,10 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
   </div>
 </div>
 
+</div><!-- /tab-whale -->
+
+<!-- ===== TAB: SIGNALS ===== -->
+<div class="tab-content" id="tab-signals">
 <!-- ===== 7.5 SIGNAL LIFECYCLE PANEL ===== -->
 <div class="sig-panel">
   <div class="sig-card">
@@ -799,6 +843,8 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 <div style="padding:0 16px 16px;">
   <div class="card" id="fr-ext-card"></div>
 </div>
+
+</div><!-- /tab-signals -->
 
 <script>
 /* ================================================================
@@ -2539,6 +2585,7 @@ function selectCoin(coin){
   rightCoin=coin;
   regimeHistory=[]; // reset regime persistence on coin switch
   localStorage.setItem('tg_right_coin',rightCoin);
+  try{switchTab('decision');}catch(e){} // reset to Decision tab on coin switch
   document.querySelectorAll('.pill').forEach(b=>b.classList.toggle('active',b.dataset.coin===rightCoin));
   document.getElementById('coin-search').value='';
   document.getElementById('coin-dropdown').classList.remove('open');
@@ -2610,6 +2657,36 @@ function setStatus(s){
   const el=document.getElementById('conn-status');el.textContent=s;el.className='status '+s.toLowerCase();
   if(s==='LIVE'){document.getElementById('stale-overlay').className='';}
 }
+// ── V6 Tab Navigation ──
+const TAB_ORDER=['decision','chart','orderflow','structure','whale','signals'];
+function switchTab(tabId){
+  if(!TAB_ORDER.includes(tabId))return;
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active',b.dataset.tab===tabId));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.toggle('active',c.id==='tab-'+tabId));
+  if(tabId==='chart'){
+    // TradingView may need a resize nudge when revealed from display:none
+    try{window.dispatchEvent(new Event('resize'));}catch(e){}
+  }
+}
+document.getElementById('tab-bar').addEventListener('click',e=>{
+  const btn=e.target.closest('.tab-btn');
+  if(btn&&btn.dataset.tab)switchTab(btn.dataset.tab);
+});
+// Swipe between tabs (mobile)
+let _tbX=0,_tbY=0;
+document.addEventListener('touchstart',e=>{const t=e.touches[0];_tbX=t.clientX;_tbY=t.clientY;},{passive:true});
+document.addEventListener('touchend',e=>{
+  const t=e.changedTouches[0];
+  const dx=t.clientX-_tbX, dy=t.clientY-_tbY;
+  if(Math.abs(dx)>80&&Math.abs(dx)>Math.abs(dy)*2){
+    const active=document.querySelector('.tab-btn.active');
+    if(!active)return;
+    const idx=TAB_ORDER.indexOf(active.dataset.tab);
+    const next=dx>0?Math.max(0,idx-1):Math.min(TAB_ORDER.length-1,idx+1);
+    if(next!==idx)switchTab(TAB_ORDER[next]);
+  }
+},{passive:true});
+
 function connect(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
   const base=location.pathname.replace(/\/+$/,'');
