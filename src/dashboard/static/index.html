@@ -83,7 +83,38 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 
 /* ===== CHART ===== */
 .chart-section{border-bottom:1px solid var(--border);overflow:hidden;position:relative;}
-.chart-body{height:520px;background:#080b12;}
+.chart-body{height:350px;background:#080b12;}
+
+/* ===== DECISION BAR ===== */
+#decision-bar{position:sticky;top:0;z-index:50;padding:10px 16px;background:rgba(10,14,23,0.92);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--border);border-left:4px solid var(--text4);display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;transition:border-left-color .3s;}
+#decision-bar.dec-entry{border-left-color:#00ff88;background:linear-gradient(90deg,rgba(0,255,136,0.08) 0%,rgba(10,14,23,0.92) 40%);}
+#decision-bar.dec-wait{border-left-color:#ffaa00;background:linear-gradient(90deg,rgba(255,170,0,0.06) 0%,rgba(10,14,23,0.92) 40%);}
+#decision-bar.dec-caution{border-left-color:#ff8800;background:linear-gradient(90deg,rgba(255,136,0,0.06) 0%,rgba(10,14,23,0.92) 40%);}
+#decision-bar.dec-skip{border-left-color:#ff4444;background:linear-gradient(90deg,rgba(255,68,68,0.06) 0%,rgba(10,14,23,0.92) 40%);}
+.dec-left{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1;}
+.dec-verdict{font-size:18px;font-weight:bold;letter-spacing:0.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.dec-verdict .dec-emoji{font-size:20px;}
+.dec-verdict.v-entry{color:#00ff88;}
+.dec-verdict.v-wait{color:#ffaa00;}
+.dec-verdict.v-caution{color:#ff8800;}
+.dec-verdict.v-skip{color:#ff4444;}
+.dec-detail{font-size:11px;color:var(--text2);line-height:1.4;}
+.dec-detail .dec-fail{color:#ff8888;font-weight:bold;}
+.dec-right{display:flex;gap:14px;align-items:center;font-size:13px;font-family:inherit;flex-wrap:wrap;justify-content:flex-end;}
+.dec-levels{display:flex;gap:14px;align-items:center;}
+.dec-levels .dec-lbl{font-size:9px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:2px;}
+.dec-levels .dec-val{font-size:14px;font-weight:bold;color:var(--text);}
+.dec-levels .dec-val.pos{color:#00ff88;}
+.dec-levels .dec-val.neg{color:#ff4444;}
+.dec-rr{font-size:11px;padding:3px 10px;border-radius:10px;background:var(--border);color:var(--text2);font-weight:bold;}
+@media(max-width:768px){
+  #decision-bar{padding:8px 10px;gap:8px;}
+  .dec-verdict{font-size:15px;}
+  .dec-verdict .dec-emoji{font-size:16px;}
+  .dec-right{gap:8px;font-size:11px;}
+  .dec-levels{gap:8px;}
+  .dec-levels .dec-val{font-size:12px;}
+}
 
 /* ===== ANALYSIS GRID ===== */
 .analysis{padding:10px 16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
@@ -489,6 +520,15 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
     <span class="chg" id="ch-chg">--</span>
   </div>
   <div class="coin-meta" id="ch-meta"></div>
+</div>
+
+<!-- ===== DECISION BAR (actionable verdict, sticky) ===== -->
+<div id="decision-bar">
+  <div class="dec-left">
+    <div class="dec-verdict" id="dec-verdict"><span class="dec-emoji">⚪</span><span>Waiting for data...</span></div>
+    <div class="dec-detail" id="dec-detail">&nbsp;</div>
+  </div>
+  <div class="dec-right" id="dec-right"></div>
 </div>
 
 <!-- ===== 5. TRADINGVIEW CHART (MAIN FOCUS) ===== -->
@@ -2215,6 +2255,8 @@ function updateMoneyFlow(d){
   ];
   const passCount=checks.filter(c=>c.pass).length;
   const warnCount=checks.filter(c=>c.warn&&!c.pass).length;
+  // Expose checklist for decision bar
+  lastChecklist={passCount,total:checks.length,checks,failed:checks.filter(c=>!c.pass&&!c.warn),warned:checks.filter(c=>c.warn&&!c.pass)};
   document.getElementById('mf-checklist').innerHTML=
     `<span class="mf-check ${passCount>=7?'pass':passCount>=5?'warn':'fail'}" style="font-weight:bold" title="Minimum 7/9 for entry">${passCount}/${checks.length} PASS</span>`+
     checks.map(c=>{
@@ -2242,6 +2284,7 @@ function fmtM(v){const a=Math.abs(v);if(a>=1e9)return'$'+(v/1e9).toFixed(2)+'B';
 
 let lastRegime='RANGE',lastRegimeResult=null;
 let regimeHistory=[]; // track last N regimes for persistence
+let lastChecklist=null; // exposed from updateMoneyFlow for Decision Bar
 function updateRegimeCard(d){
   let{regime,conf:regimeConf,scores}=detectRegime(d);
 
@@ -2331,6 +2374,75 @@ function updateRegimeCard(d){
   document.getElementById('reg-note').innerHTML=result.note;
 }
 
+// ── Decision Bar ────────────────────────
+function renderDecisionBar(d){
+  const bar=document.getElementById('decision-bar');
+  const vEl=document.getElementById('dec-verdict');
+  const dEl=document.getElementById('dec-detail');
+  const rEl=document.getElementById('dec-right');
+  if(!bar||!vEl)return;
+
+  const r=lastRegimeResult, cl=lastChecklist;
+  const price=(d&&d.price)||(ws3Data.liq_cluster&&ws3Data.liq_cluster.price)||0;
+
+  if(!r||!cl||!price){
+    bar.className='';
+    vEl.className='dec-verdict';
+    vEl.innerHTML='<span class="dec-emoji">⚪</span><span>Collecting data…</span>';
+    dEl.innerHTML='&nbsp;';
+    rEl.innerHTML='';
+    return;
+  }
+
+  const pass=cl.passCount, total=cl.total, bias=r.bias, regime=lastRegime;
+  const regimeKill=(regime==='RANGE'||r.status==='EXPIRED'||r.status==='AVOID');
+
+  // Derive verdict
+  let verdict, emoji, cls, barCls, detail;
+  if(regimeKill||pass<=3){
+    verdict='SKIP — No edge'; emoji='🔴'; cls='v-skip'; barCls='dec-skip';
+    detail=`Only ${pass}/${total} checks. Regime: ${regime}${r.status?' • '+r.status:''}. Flow: ${d.flow_state||'—'}`;
+  } else if(pass<=6){
+    verdict=`${rightCoin} ${bias||'NEUTRAL'} — ${pass}/${total} CAUTION`; emoji='🟠'; cls='v-caution'; barCls='dec-caution';
+    const failNames=[...(cl.failed||[]),...(cl.warned||[])].slice(0,4).map(c=>`<span class="dec-fail">✗ ${c.label}</span>`).join(' ');
+    detail=`Too many blockers: ${failNames||'regime weak'}. Grade ${r.grade}.`;
+  } else if(pass<total){
+    verdict=`${rightCoin} ${bias||'NEUTRAL'} — ${pass}/${total} WAIT`; emoji='🟡'; cls='v-wait'; barCls='dec-wait';
+    const blockers=[...(cl.failed||[]),...(cl.warned||[])].slice(0,3).map(c=>`<span class="dec-fail">✗ ${c.label}</span>`).join(' ');
+    detail=`Blocker: ${blockers||'none'}. Grade ${r.grade}, confidence ${r.confidence||0}%.`;
+  } else {
+    verdict=`${rightCoin} ${bias||'NEUTRAL'} — ${pass}/${total} VALID — ENTRY NOW`; emoji='🟢'; cls='v-entry'; barCls='dec-entry';
+    detail=`All checks passed. Grade ${r.grade}, confidence ${r.confidence||0}%. Regime: ${regime}.`;
+  }
+
+  bar.className=barCls;
+  vEl.className='dec-verdict '+cls;
+  vEl.innerHTML=`<span class="dec-emoji">${emoji}</span><span>${verdict}</span>`;
+  dEl.innerHTML=detail;
+
+  // Entry / SL / TP (hide if SKIP or no liquidation data or no bias)
+  const liq=ws3Data.liq_cluster;
+  if(cls==='v-skip'||!liq||!bias||bias==='NEUTRAL'||!(liq.above&&liq.above.price>0)||!(liq.below&&liq.below.price>0)){
+    rEl.innerHTML='';
+    return;
+  }
+  const shortLiq=liq.above.price, longLiq=liq.below.price;
+  const isLong=bias==='LONG';
+  const entry=price;
+  const sl=isLong?longLiq:shortLiq;
+  const tp=isLong?shortLiq:longLiq;
+  const risk=Math.abs(entry-sl), reward=Math.abs(tp-entry);
+  const rr=risk>0?(reward/risk):0;
+  const fmtP=v=>v>=1000?v.toFixed(1):v>=1?v.toFixed(2):v.toFixed(4);
+  rEl.innerHTML=`
+    <div class="dec-levels">
+      <div><span class="dec-lbl">Entry</span><span class="dec-val">$${fmtP(entry)}</span></div>
+      <div><span class="dec-lbl">SL</span><span class="dec-val neg">$${fmtP(sl)}</span></div>
+      <div><span class="dec-lbl">TP</span><span class="dec-val pos">$${fmtP(tp)}</span></div>
+    </div>
+    <span class="dec-rr">R:R ${rr.toFixed(1)}</span>`;
+}
+
 // ── Main Render ──────────────────────────
 function render(state){
   try{
@@ -2353,6 +2465,7 @@ function render(state){
   try{document.getElementById('card-cvd').innerHTML=buildCvdCard(d);}catch(e){console.error('CvdCard error:',e);}
   try{document.getElementById('fr-ext-card').innerHTML=buildFrExtCard(state);}catch(e){console.error('FrExtCard error:',e);}
   try{document.getElementById('whale-list').innerHTML=buildWhales(ws3Data.whale_alerts||state.whale_alerts);}catch(e){console.error('Whales error:',e);}
+  try{renderDecisionBar(d);}catch(e){console.error('DecisionBar error:',e);}
   }catch(renderErr){console.error('RENDER CRASH:',renderErr);}
 }
 
@@ -2447,7 +2560,7 @@ function connect(){
           ws3Data[msg.type]=msg.data;
           if(lastState){
             const d=lastState.coins?lastState.coins[rightCoin]||{}:{};
-            if(msg.type==='liq_cluster')document.getElementById('card-liq').innerHTML=buildLiqCard();
+            if(msg.type==='liq_cluster'){document.getElementById('card-liq').innerHTML=buildLiqCard();try{renderDecisionBar(d);}catch(e){}}
             if(msg.type==='cvd_history')document.getElementById('card-cvd').innerHTML=buildCvdCard(d);
             if(msg.type==='taker')document.getElementById('card-taker').innerHTML=buildTakerCard(d);
             if(msg.type==='long_short')document.getElementById('card-taker').innerHTML=buildTakerCard(d);
