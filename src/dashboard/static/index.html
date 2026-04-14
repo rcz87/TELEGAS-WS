@@ -2256,7 +2256,7 @@ function updateMoneyFlow(d){
   const passCount=checks.filter(c=>c.pass).length;
   const warnCount=checks.filter(c=>c.warn&&!c.pass).length;
   // Expose checklist for decision bar
-  lastChecklist={passCount,total:checks.length,checks,failed:checks.filter(c=>!c.pass&&!c.warn),warned:checks.filter(c=>c.warn&&!c.pass)};
+  lastChecklist={passCount,total:checks.length,checks,failed:checks.filter(c=>!c.pass&&!c.warn),warned:checks.filter(c=>c.warn&&!c.pass),flowState};
   document.getElementById('mf-checklist').innerHTML=
     `<span class="mf-check ${passCount>=7?'pass':passCount>=5?'warn':'fail'}" style="font-weight:bold" title="Minimum 7/9 for entry">${passCount}/${checks.length} PASS</span>`+
     checks.map(c=>{
@@ -2401,7 +2401,7 @@ function renderDecisionBar(d){
   let verdict, emoji, cls, barCls, detail;
   if(regimeKill||pass<=3){
     verdict='SKIP — No edge'; emoji='🔴'; cls='v-skip'; barCls='dec-skip';
-    detail=`Only ${pass}/${total} checks. Regime: ${regime}${r.status?' • '+r.status:''}. Flow: ${d.flow_state||'—'}`;
+    detail=`Only ${pass}/${total} checks. Regime: ${regime}${r.status?' • '+r.status:''}. Flow: ${cl.flowState||'—'}`;
   } else if(pass<=6){
     verdict=`${rightCoin} ${bias||'NEUTRAL'} — ${pass}/${total} CAUTION`; emoji='🟠'; cls='v-caution'; barCls='dec-caution';
     const failNames=[...(cl.failed||[]),...(cl.warned||[])].slice(0,4).map(c=>`<span class="dec-fail">✗ ${c.label}</span>`).join(' ');
