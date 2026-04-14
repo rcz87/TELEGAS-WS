@@ -91,6 +91,7 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 #decision-bar.dec-wait{border-left-color:#ffaa00;background:linear-gradient(90deg,rgba(255,170,0,0.06) 0%,rgba(10,14,23,0.92) 40%);}
 #decision-bar.dec-caution{border-left-color:#ff8800;background:linear-gradient(90deg,rgba(255,136,0,0.06) 0%,rgba(10,14,23,0.92) 40%);}
 #decision-bar.dec-skip{border-left-color:#ff4444;background:linear-gradient(90deg,rgba(255,68,68,0.06) 0%,rgba(10,14,23,0.92) 40%);}
+#decision-bar.dec-watch{border-left-color:#4488ff;background:linear-gradient(90deg,rgba(68,136,255,0.07) 0%,rgba(10,14,23,0.92) 40%);}
 .dec-left{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1;}
 .dec-verdict{font-size:18px;font-weight:bold;letter-spacing:0.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
 .dec-verdict .dec-emoji{font-size:20px;}
@@ -98,6 +99,7 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
 .dec-verdict.v-wait{color:#ffaa00;}
 .dec-verdict.v-caution{color:#ff8800;}
 .dec-verdict.v-skip{color:#ff4444;}
+.dec-verdict.v-watch{color:#4488ff;}
 .dec-detail{font-size:11px;color:var(--text2);line-height:1.4;}
 .dec-detail .dec-fail{color:#ff8888;font-weight:bold;}
 .dec-right{display:flex;gap:14px;align-items:center;font-size:13px;font-family:inherit;flex-wrap:wrap;justify-content:flex-end;}
@@ -708,6 +710,7 @@ body{font-family:'JetBrains Mono','Fira Code','SF Mono','Cascadia Code','Consola
     <div style="margin-top:6px;">
       <div style="font-size:9px;color:var(--text4);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px;">ENTRY CHECKLIST</div>
       <div class="mf-checklist" id="mf-checklist"></div>
+      <div id="mf-blockers" style="font-size:10px;color:var(--text2);margin-top:6px;line-height:1.4;display:none;"></div>
     </div>
 
     <!-- Funding State -->
@@ -2243,15 +2246,24 @@ function updateMoneyFlow(d){
   const chgSameDir=(mfSpotChg>0&&mfFutChg>0)||(mfSpotChg<0&&mfFutChg<0);
   const chgOppose=(mfSpotChg>0&&mfFutChg<0)||(mfSpotChg<0&&mfFutChg>0);
   const checks=[
-    {label:'REGIME',pass:regOk&&regReady,warn:regOk&&!regReady,desc:lastRegime+' — '+(lastRegimeResult?lastRegimeResult.status:'N/A')},
-    {label:'CVD ALIGNED',pass:cvdAlign.includes('ALIGNED')&&!cvdAlign.includes('WEAK'),warn:cvdAlign.includes('WEAK'),desc:'SpotCVD+FutCVD direction+change aligned'},
-    {label:'Δ60m SYNC',pass:chgSameDir,warn:!chgSameDir&&!chgOppose,desc:chgSameDir?'Spot+Fut change same direction':chgOppose?'Spot vs Fut change opposing':'One side flat'},
-    {label:'OI CONFIRM',pass:oiChg>0.3||matrix==='MOMENTUM',warn:oiChg>0&&oiChg<=0.3,desc:'OI '+(oiChg>0?'+':'')+oiChg.toFixed(2)+'% — '+(oiChg>0.3?'supporting':'weak')},
-    {label:'TAKER',pass:Math.abs(tNet)>0&&((tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')),warn:Math.abs(tNet)>0&&tPct>40&&tPct<60,desc:'Taker net '+fmtM(tNet)+' — '+(tPct>60?'buy dominant':tPct<40?'sell dominant':'balanced')},
-    {label:'MARKET',pass:!mktState.includes('CHOP')&&!mktState.includes('TRANSITION')&&mktConf!=='LOW',warn:mktConf==='LOW',desc:mktState+' ('+mktConf+')'},
-    {label:'FLOW',pass:!flowState.includes('CHOPPY')&&!flowState.includes('EXHAUSTED')&&!flowState.includes('FLAT'),warn:flowState.includes('DECEL'),desc:flowState},
-    {label:'FR SAFE',pass:Math.abs(fr)<0.03,warn:Math.abs(fr)>=0.03&&Math.abs(fr)<0.05,desc:'FR '+fr.toFixed(4)+'% — '+(Math.abs(fr)<0.01?'normal':Math.abs(fr)<0.03?'elevated':'extreme')},
-    {label:'SESSION',pass:sessionLabel==='NY'||sessionLabel==='LONDON',warn:sessionLabel==='ASIA',desc:sessionLabel+' session'},
+    {label:'REGIME',pass:regOk&&regReady,warn:regOk&&!regReady,
+      desc:`Regime: ${lastRegime} • Status: ${lastRegimeResult?lastRegimeResult.status:'N/A'} — need READY or WATCH (not RANGE/EXPIRED/AVOID)`},
+    {label:'CVD ALIGNED',pass:cvdAlign.includes('ALIGNED')&&!cvdAlign.includes('WEAK'),warn:cvdAlign.includes('WEAK'),
+      desc:`Alignment: ${cvdAlign||'N/A'} — need ALIGNED BULLISH or ALIGNED BEARISH (not WEAK/DIVERGING)`},
+    {label:'Δ60m SYNC',pass:chgSameDir,warn:!chgSameDir&&!chgOppose,
+      desc:`Spot Δ60m ${fmtM(mfSpotChg)} vs Fut Δ60m ${fmtM(mfFutChg)} — ${chgSameDir?'same direction ✓':chgOppose?'OPPOSING (divergence)':'one side flat'}. Need same sign.`},
+    {label:'OI CONFIRM',pass:oiChg>0.3||matrix==='MOMENTUM',warn:oiChg>0&&oiChg<=0.3,
+      desc:`OI ${oiChg>0?'+':''}${oiChg.toFixed(2)}% — need >0.3% (or MOMENTUM matrix). Current: ${oiChg>0.3?'supporting':oiChg>0?'weak':'contradicting'}.`},
+    {label:'TAKER',pass:Math.abs(tNet)>0&&((tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')),warn:Math.abs(tNet)>0&&tPct>40&&tPct<60,
+      desc:`Net ${fmtM(tNet)} (${tPct>60?'buy dom':tPct<40?'sell dom':'balanced'} ${tPct.toFixed(0)}%) — need aligned with SpotCVD ${spotDir}. ${(tNet>0&&spotDir==='RISING')||(tNet<0&&spotDir==='FALLING')?'✓':'✗ misaligned'}`},
+    {label:'MARKET',pass:!mktState.includes('CHOP')&&!mktState.includes('TRANSITION')&&mktConf!=='LOW',warn:mktConf==='LOW',
+      desc:`State: ${mktState} (${mktConf}) — need CONTINUATION/ABSORPTION/DELEVERAGING with MEDIUM+ conf (not CHOP/TRANSITION/LOW)`},
+    {label:'FLOW',pass:!flowState.includes('CHOPPY')&&!flowState.includes('EXHAUSTED')&&!flowState.includes('FLAT'),warn:flowState.includes('DECEL'),
+      desc:`Flow: ${flowState} — need ACCELERATING/STEADY/BUILDING (not CHOPPY/EXHAUSTED/FLAT)`},
+    {label:'FR SAFE',pass:Math.abs(fr)<0.03,warn:Math.abs(fr)>=0.03&&Math.abs(fr)<0.05,
+      desc:`FR ${fr.toFixed(4)}% — need abs<0.03%. Current: ${Math.abs(fr)<0.01?'normal':Math.abs(fr)<0.03?'elevated':Math.abs(fr)<0.05?'high (warn)':'extreme (fail)'}`},
+    {label:'SESSION',pass:sessionLabel==='NY'||sessionLabel==='LONDON',warn:sessionLabel==='ASIA',
+      desc:`Current: ${sessionLabel} — best NY/LONDON (ASIA = warn, weaker activity)`},
   ];
   const passCount=checks.filter(c=>c.pass).length;
   const warnCount=checks.filter(c=>c.warn&&!c.pass).length;
@@ -2261,8 +2273,26 @@ function updateMoneyFlow(d){
     `<span class="mf-check ${passCount>=7?'pass':passCount>=5?'warn':'fail'}" style="font-weight:bold" title="Minimum 7/9 for entry">${passCount}/${checks.length} PASS</span>`+
     checks.map(c=>{
     const cls=c.pass?'pass':(c.warn?'warn':'fail');
-    return`<span class="mf-check ${cls}" title="${c.desc}">${c.pass?'✓':c.warn?'⚠':'✗'} ${c.label}</span>`;
+    return`<span class="mf-check ${cls}" title="${c.desc.replace(/"/g,'&quot;')}">${c.pass?'✓':c.warn?'⚠':'✗'} ${c.label}</span>`;
   }).join('');
+
+  // Blocker summary — one-line recap of top failed/warned checks
+  const blockerEl=document.getElementById('mf-blockers');
+  if(blockerEl){
+    const fails=lastChecklist.failed.slice(0,3).map(c=>`<b>${c.label}</b> (${c.desc.split(' — ')[0].replace(/^[^:]+:\s*/,'')})`);
+    const warns=lastChecklist.warned.slice(0,2).map(c=>`${c.label}`);
+    if(fails.length||warns.length){
+      let parts=[];
+      if(fails.length)parts.push(`<span style="color:var(--red)">✗ ${fails.join(', ')}</span>`);
+      if(warns.length)parts.push(`<span style="color:var(--yellow)">⚠ ${warns.join(', ')}</span>`);
+      blockerEl.innerHTML='Blocker utama: '+parts.join(' · ');
+      blockerEl.style.display='block';
+    } else {
+      blockerEl.innerHTML='All checks passing — good to go.';
+      blockerEl.style.display='block';
+      blockerEl.style.color='var(--green)';
+    }
+  }
 
   // Funding State
   const frEl=document.getElementById('mf-fr-val');
@@ -2396,10 +2426,36 @@ function renderDecisionBar(d){
 
   const pass=cl.passCount, total=cl.total, bias=r.bias, regime=lastRegime;
   const regimeKill=(regime==='RANGE'||r.status==='EXPIRED'||r.status==='AVOID');
+  const regimeBuilding=(regime==='ACCUMULATION'||regime==='DISTRIBUTION');
+
+  // Pre-compute R:R from liquidation clusters (may be null if no data)
+  const liq=ws3Data.liq_cluster;
+  const hasLiq=liq&&liq.above&&liq.above.price>0&&liq.below&&liq.below.price>0;
+  const isLong=bias==='LONG';
+  let entry=price, sl=0, tp=0, rr=0, tpTooClose=false;
+  if(hasLiq&&bias&&bias!=='NEUTRAL'){
+    sl=isLong?liq.below.price:liq.above.price;
+    tp=isLong?liq.above.price:liq.below.price;
+    const risk=Math.abs(entry-sl), reward=Math.abs(tp-entry);
+    rr=risk>0?(reward/risk):0;
+    tpTooClose=entry>0&&(Math.abs(tp-entry)/entry)<0.001;
+  }
+  const lowRR=hasLiq&&bias&&bias!=='NEUTRAL'&&(rr<0.5||tpTooClose);
 
   // Derive verdict
   let verdict, emoji, cls, barCls, detail;
-  if(regimeKill||pass<=3){
+  if(lowRR){
+    verdict=`${rightCoin} SKIP — R:R ${rr.toFixed(2)}`; emoji='🔴'; cls='v-skip'; barCls='dec-skip';
+    detail=tpTooClose
+      ? `TP too close to entry (${((tp-entry)/entry*100).toFixed(2)}%). Liquidation cluster basically at price — no edge.`
+      : `R:R terlalu kecil (${rr.toFixed(2)}). Liq terlalu dekat, no edge.`;
+  } else if(regimeKill){
+    verdict='SKIP — No edge'; emoji='🔴'; cls='v-skip'; barCls='dec-skip';
+    detail=`Only ${pass}/${total} checks. Regime: ${regime}${r.status?' • '+r.status:''}. Flow: ${cl.flowState||'—'}`;
+  } else if(pass<=3&&regimeBuilding){
+    verdict=`${rightCoin} WATCH — Setup forming`; emoji='🔵'; cls='v-watch'; barCls='dec-watch';
+    detail=`Regime ${regime} but only ${pass}/${total} checks. Monitor — belum waktunya entry.`;
+  } else if(pass<=3){
     verdict='SKIP — No edge'; emoji='🔴'; cls='v-skip'; barCls='dec-skip';
     detail=`Only ${pass}/${total} checks. Regime: ${regime}${r.status?' • '+r.status:''}. Flow: ${cl.flowState||'—'}`;
   } else if(pass<=6){
@@ -2420,19 +2476,11 @@ function renderDecisionBar(d){
   vEl.innerHTML=`<span class="dec-emoji">${emoji}</span><span>${verdict}</span>`;
   dEl.innerHTML=detail;
 
-  // Entry / SL / TP (hide if SKIP or no liquidation data or no bias)
-  const liq=ws3Data.liq_cluster;
-  if(cls==='v-skip'||!liq||!bias||bias==='NEUTRAL'||!(liq.above&&liq.above.price>0)||!(liq.below&&liq.below.price>0)){
+  // Entry / SL / TP — only show if verdict is actionable (not SKIP/WATCH) and R:R valid
+  if(cls==='v-skip'||cls==='v-watch'||!hasLiq||!bias||bias==='NEUTRAL'){
     rEl.innerHTML='';
     return;
   }
-  const shortLiq=liq.above.price, longLiq=liq.below.price;
-  const isLong=bias==='LONG';
-  const entry=price;
-  const sl=isLong?longLiq:shortLiq;
-  const tp=isLong?shortLiq:longLiq;
-  const risk=Math.abs(entry-sl), reward=Math.abs(tp-entry);
-  const rr=risk>0?(reward/risk):0;
   const fmtP=v=>v>=1000?v.toFixed(1):v>=1?v.toFixed(2):v.toFixed(4);
   rEl.innerHTML=`
     <div class="dec-levels">
