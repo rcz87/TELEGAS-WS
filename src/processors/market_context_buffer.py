@@ -59,6 +59,8 @@ class MarketContext:
     whale_largest_value_usd: float = 0.0
     whale_largest_direction: str = ""
     whale_alignment: str = "NEUTRAL"
+    whale_count: int = 0
+    whale_max_usd: float = 0.0
 
     # Orderbook data
     orderbook_bid_vol: float = 0.0
@@ -324,12 +326,16 @@ class MarketContextBuffer:
         whale_conflicting = False
         whale_largest_value = 0.0
         whale_largest_dir = ""
+        whale_max_any = 0.0
         for wp in whale_positions:
+            if wp.position_value_usd > whale_max_any:
+                whale_max_any = wp.position_value_usd
             if wp.direction != signal_direction:
                 whale_conflicting = True
                 if wp.position_value_usd > whale_largest_value:
                     whale_largest_value = wp.position_value_usd
                     whale_largest_dir = wp.direction
+        whale_total_count = len(whale_positions)
 
         # Orderbook data
         orderbook = self.get_latest_orderbook(symbol)
@@ -390,6 +396,8 @@ class MarketContextBuffer:
             whale_largest_value_usd=whale_largest_value,
             whale_largest_direction=whale_largest_dir,
             whale_alignment=whale_alignment,
+            whale_count=whale_total_count,
+            whale_max_usd=whale_max_any,
             orderbook_bid_vol=ob_bid_vol,
             orderbook_ask_vol=ob_ask_vol,
             orderbook_dominant=ob_dominant,

@@ -1127,6 +1127,14 @@ class TeleglasPro:
                     # Log full feature snapshot for ML training (was missing — caused 0 WIN in signal_features)
                     if db_id:
                         try:
+                            # Inject market context so feature_logger sees OI/CVD/whale data (REST path bug fix)
+                            rest_ctx = self._build_context_dict(base_symbol)
+                            signal.metadata = dict(signal.metadata or {})
+                            signal.metadata['market_context'] = rest_ctx
+                            rest_assessment = self.market_context_buffer.evaluate_context(
+                                base_symbol, signal.direction
+                            )
+                            rest_filter_assess = rest_assessment.combined_assessment if rest_assessment else ""
                             features = self.feature_logger.extract_features(
                                 signal=signal,
                                 symbol=symbol,
@@ -1134,7 +1142,7 @@ class TeleglasPro:
                                 base_confidence=signal.confidence,
                                 adjusted_confidence=signal.confidence,
                                 final_confidence=signal.confidence,
-                                filter_assessment="",
+                                filter_assessment=rest_filter_assess,
                                 leading_score=0,
                                 signal_id=db_id,
                             )
@@ -1589,14 +1597,19 @@ class TeleglasPro:
                         'whale_largest_value_usd': ctx.whale_largest_value_usd,
                         'whale_largest_direction': ctx.whale_largest_direction,
                         'whale_alignment': ctx.whale_alignment,
+                        # Whale counts for ML feature logger
+                        'whale_count': ctx.whale_count,
+                        'whale_max_usd': ctx.whale_max_usd,
                         # Orderbook data
                         'orderbook_bid_vol': ctx.orderbook_bid_vol,
                         'orderbook_ask_vol': ctx.orderbook_ask_vol,
                         'orderbook_dominant': ctx.orderbook_dominant,
+                        'orderbook_delta': (ctx.orderbook_bid_vol - ctx.orderbook_ask_vol),
                         # Per-exchange funding rates
                         'funding_per_exchange': ctx.funding_per_exchange,
                         # Price data
                         'current_price': ctx.current_price,
+                        'price': ctx.current_price,
                         'price_change_24h_pct': ctx.price_change_24h_pct,
                         'volume_24h': ctx.volume_24h,
                     }
@@ -2345,13 +2358,20 @@ class TeleglasPro:
             ctx['orderbook_dominant'] = ob.dominant_side
             ctx['orderbook_bid_vol'] = ob.total_bid_vol
             ctx['orderbook_ask_vol'] = ob.total_ask_vol
+            ctx['orderbook_delta'] = ob.total_bid_vol - ob.total_ask_vol
 
         # Price
         price = self.market_context_buffer.get_latest_price(base_symbol)
         if price:
             ctx['current_price'] = price.price
+            ctx['price'] = price.price
             ctx['price_change_24h_pct'] = price.change_24h_pct
             ctx['volume_24h'] = price.volume_24h
+
+        # Whale (total, for ML feature logger)
+        whales = self.market_context_buffer.get_whale_positions(base_symbol, min_value_usd=1_000_000)
+        ctx['whale_count'] = len(whales)
+        ctx['whale_max_usd'] = max((w.position_value_usd for w in whales), default=0.0)
 
         return ctx
 
