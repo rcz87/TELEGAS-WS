@@ -299,6 +299,13 @@ class TeleglasPro:
         self.PROACTIVE_MAX_PER_HOUR = 5      # Max proactive alerts per hour
         self._proactive_hourly: list = []    # Timestamps for hourly rate limit
 
+        # Trading list: only these coins send Telegram alerts
+        # Empty list or missing = no filter (all coins allowed)
+        tl = config.get('trading_list', [])
+        self.trading_list = set(s.strip().upper() for s in tl) if tl else None
+        if self.trading_list:
+            self.logger.info(f"📋 Trading list: {sorted(self.trading_list)} — only these go to Telegram")
+
         # Debouncing (FIX: Prevent task explosion)
         self.analysis_locks = {}  # Per-symbol locks
         self.last_analysis = {}   # Per-symbol last analysis time
@@ -992,6 +999,12 @@ class TeleglasPro:
 
         # --- Extract base symbol ---
         base_symbol = symbol.replace("USDT", "").replace("usdt", "") if symbol else symbol
+
+        # --- 0. Trading list filter ---
+        if self.trading_list and base_symbol not in self.trading_list:
+            return {"send": False, "tier": tier, "confidence": conf,
+                    "btc_aligned": True, "btc_tag": "",
+                    "penalties": ["not_in_trading_list"]}
 
         # --- 1. Noise filter ---
         routing = self._check_noise_filters(symbol, direction, conf)
@@ -1704,7 +1717,8 @@ class TeleglasPro:
                 lifecycle_data = self.lifecycle.ingest(signal_dict)
 
                 # Check dashboard toggle AND market context filter + noise filters
-                if self._is_coin_active(symbol) and filter_passed:
+                in_trading_list = not self.trading_list or base_symbol in self.trading_list
+                if self._is_coin_active(symbol) and filter_passed and in_trading_list:
                     # Noise filter check
                     ws_routing = self._check_noise_filters(
                         symbol, trading_signal.direction, trading_signal.confidence
@@ -2836,6 +2850,7 @@ def load_config() -> dict:
                 'max_liquidations': 1000,
                 'max_trades': 500
             },
+            'trading_list': ['BTC', 'ETH', 'SOL', 'AVAX', 'XRP', 'BNB', 'DOGE'],
             'websocket': {
                 'url': "wss://open-ws.coinglass.com/ws-api",
                 'heartbeat_interval': 20,

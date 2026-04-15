@@ -327,6 +327,17 @@ fast_poll:
     - LINK
     - ADA
 
+# Trading List — HANYA coin ini yang kirim alert Telegram
+# Coin lain tetap di-monitor (dashboard, data, ML) tapi SILENT di Telegram
+trading_list:
+  - BTC
+  - ETH
+  - SOL
+  - AVAX
+  - XRP
+  - BNB
+  - DOGE
+
 # Market Context (OI + Funding Rate from CoinGlass REST API)
 market_context:
   enabled: true
